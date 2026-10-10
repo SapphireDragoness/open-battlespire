@@ -1,0 +1,30 @@
+# Build output
+/build*/
+/out/
+
+# NEVER commit original game data or anything extracted from it
+*.BSA
+*.bsa
+*.BS6
+*.bs6
+*.BSI
+*.bsi
+*.3d
+*.3D
+*.FLC
+*.flc
+*.SMK
+*.smk
+*.SND
+*.snd
+*.SCL
+*.scl
+*.FNT
+*.fnt
+*.gog
+*.ins
+GAMEDATA/
+SAVE*/
+/extracted/
+
+docs/
