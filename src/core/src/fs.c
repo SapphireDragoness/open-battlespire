@@ -5,10 +5,13 @@
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <direct.h>
 #include <windows.h>
+#define bs_mkdir_one(p) _mkdir(p)
 #else
 #include <dirent.h>
 #include <sys/stat.h>
+#define bs_mkdir_one(p) mkdir((p), 0755)
 #endif
 
 int bs_strcasecmp(const char *a, const char *b)
@@ -202,4 +205,36 @@ bs_result bs_fs_read_file(const char *path, bs_arena *arena, uint8_t **out_data,
 done:
     fclose(f);
     return res;
+}
+
+bs_result bs_fs_mkdirs(const char *path)
+{
+    char buf[BS_PATH_MAX];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof buf)
+        return BS_ERR_ARGS;
+    memcpy(buf, path, len + 1);
+
+    /* Create each prefix ending at a separator, then the full path. */
+    for (size_t i = 1; i <= len; i++) {
+        if (i < len && buf[i] != '/' && buf[i] != '\\')
+            continue;
+        char saved = buf[i];
+        buf[i] = '\0';
+        if (!bs_fs_is_dir(buf) && bs_mkdir_one(buf) != 0 && !bs_fs_is_dir(buf))
+            return BS_ERR_IO;
+        buf[i] = saved;
+    }
+    return BS_OK;
+}
+
+bs_result bs_fs_write_file(const char *path, const void *data, size_t size)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return BS_ERR_IO;
+    bool ok = size == 0 || fwrite(data, 1, size, f) == size;
+    if (fclose(f) != 0)
+        ok = false;
+    return ok ? BS_OK : BS_ERR_IO;
 }

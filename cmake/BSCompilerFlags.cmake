@@ -18,7 +18,12 @@ function(bs_configure_target target)
         if(BS_WARNINGS_AS_ERRORS)
             target_compile_options(${target} PRIVATE -Werror)
         endif()
-        if(BS_SANITIZE)
+        if(BS_FUZZ)
+            target_compile_options(${target} PRIVATE
+                -fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer
+                -fno-sanitize-recover=undefined)
+            target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+        elseif(BS_SANITIZE)
             target_compile_options(${target} PRIVATE
                 -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
             target_link_options(${target} PRIVATE -fsanitize=address,undefined)

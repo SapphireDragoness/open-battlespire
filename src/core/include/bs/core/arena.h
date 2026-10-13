@@ -42,8 +42,14 @@ void bs_arena_rewind(bs_arena *a, bs_arena_mark mark);
 void bs_arena_reset(bs_arena *a);
 
 #define BS_ARENA_NEW(a, T) ((T *)bs_arena_alloc((a), sizeof(T), _Alignof(T)))
-#define BS_ARENA_ARRAY(a, T, n) \
-    ((size_t)(n) > SIZE_MAX / sizeof(T) ? (T *)NULL \
-                                        : (T *)bs_arena_alloc((a), sizeof(T) * (size_t)(n), _Alignof(T)))
+/* n elements of size bytes, or NULL if n * size overflows. */
+static inline void *bs_arena_alloc_array(bs_arena *a, size_t n, size_t size, size_t align)
+{
+    if (size != 0 && n > SIZE_MAX / size)
+        return NULL;
+    return bs_arena_alloc(a, n * size, align);
+}
+
+#define BS_ARENA_ARRAY(a, T, n) ((T *)bs_arena_alloc_array((a), (size_t)(n), sizeof(T), _Alignof(T)))
 
 #endif

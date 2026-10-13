@@ -41,6 +41,12 @@ bs_result bs_fs_read_file(const char *path, bs_arena *arena, uint8_t **out_data,
 typedef bool (*bs_fs_dir_fn)(void *user, const char *name, bool is_dir);
 bs_result bs_fs_list_dir(const char *path, bs_fs_dir_fn fn, void *user);
 
+/* Creates a directory and any missing parents. Succeeds if it already exists. */
+bs_result bs_fs_mkdirs(const char *path);
+
+/* Writes (creates or truncates) a host file. */
+bs_result bs_fs_write_file(const char *path, const void *data, size_t size);
+
 /* Joins a and b with a '/' separator. Returns false if it does not fit. */
 bool bs_path_join(char *out, size_t cap, const char *a, const char *b);
 

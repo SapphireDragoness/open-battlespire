@@ -26,5 +26,7 @@
 GAMEDATA/
 SAVE*/
 /extracted/
+bsview_*.png
 
 docs/
+screenshots/

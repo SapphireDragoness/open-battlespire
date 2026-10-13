@@ -27,15 +27,51 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo"
             }
+        },
+        {
+            "name": "fuzz",
+            "displayName": "libFuzzer (Clang, ASan/UBSan)",
+            "binaryDir": "${sourceDir}/build/fuzz",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "BS_WARNINGS_AS_ERRORS": "ON",
+                "BS_FUZZ": "ON"
+            }
         }
     ],
     "buildPresets": [
-        { "name": "debug", "configurePreset": "debug" },
-        { "name": "asan", "configurePreset": "asan" },
-        { "name": "release", "configurePreset": "release" }
+        {
+            "name": "debug",
+            "configurePreset": "debug"
+        },
+        {
+            "name": "asan",
+            "configurePreset": "asan"
+        },
+        {
+            "name": "release",
+            "configurePreset": "release"
+        },
+        {
+            "name": "fuzz",
+            "configurePreset": "fuzz"
+        }
     ],
     "testPresets": [
-        { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
-        { "name": "asan", "configurePreset": "asan", "output": { "outputOnFailure": true } }
+        {
+            "name": "debug",
+            "configurePreset": "debug",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "asan",
+            "configurePreset": "asan",
+            "output": {
+                "outputOnFailure": true
+            }
+        }
     ]
 }

@@ -8,9 +8,11 @@
 
 int cmd_info(int argc, char **argv)
 {
-    const char *root = bstool_install_arg(argc, argv);
-    if (!root)
+    const char *root = argc >= 2 ? argv[1] : bstool_data_dir();
+    if (!root) {
+        fprintf(stderr, "info: no install directory; pass one or set BS_DATA_DIR\n");
         return 2;
+    }
 
     bs_install inst;
     bs_result r = bs_install_detect(root, &inst);

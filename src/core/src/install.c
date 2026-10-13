@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bs/core/log.h"
+
 const char *const bs_install_required_files[] = {
     "GAME.EXE",
     "GAMEDATA/LEVELS.TXT",
@@ -71,4 +73,21 @@ bs_result bs_install_detect(const char *root, bs_install *out)
     out->has_loose_waves = bs_fs_resolve(root, "WAVES.BSA", waves, sizeof waves) == BS_OK;
 
     return BS_OK;
+}
+
+bs_result bs_install_mount(const bs_install *inst, bs_vfs *vfs, bs_cdimage **out_cd)
+{
+    *out_cd = NULL;
+    if (inst->has_cd_image) {
+        bs_cdimage *cd;
+        bs_result r = bs_cdimage_open(inst->cd_cue, &cd);
+        if (r == BS_OK) {
+            bs_vfs_mount_cd(vfs, cd, "");
+            bs_vfs_mount_cd(vfs, cd, "BATSPIRE");
+            *out_cd = cd;
+        } else {
+            BS_WARN("could not open CD image %s: %s", inst->cd_cue, bs_result_str(r));
+        }
+    }
+    return bs_vfs_mount_dir(vfs, inst->root);
 }

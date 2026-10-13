@@ -4,8 +4,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "bs/core/cdimage.h"
 #include "bs/core/fs.h"
 #include "bs/core/result.h"
+#include "bs/core/vfs.h"
 
 /* Detection of an original Battlespire installation. */
 
@@ -34,6 +36,20 @@ typedef struct bs_install {
 bs_result bs_install_detect(const char *root, bs_install *out);
 
 const char *bs_game_version_str(bs_game_version v);
+
+/*
+ * Mounts an install into vfs using the standard layout, lowest to highest
+ * priority:
+ *
+ *   CD image root          VIDEOS/STORY.SMK, ...
+ *   CD image BATSPIRE/     WAVES.BSA, and GAMEDATA/... as a fallback
+ *   install root           GAME.EXE, GAMEDATA/..., loose WAVES.BSA
+ *
+ * Opens the CD image, if any, into *out_cd (NULL otherwise). The caller closes
+ * it with bs_cdimage_close() once the VFS is no longer used. A CD image that
+ * fails to open is logged and skipped.
+ */
+bs_result bs_install_mount(const bs_install *inst, bs_vfs *vfs, bs_cdimage **out_cd);
 
 /* Data files every install must have; NULL-terminated. Paths relative to the install root. */
 extern const char *const bs_install_required_files[];
