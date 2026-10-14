@@ -1,0 +1,7 @@
+add_library(bs_audio STATIC src/audio.c src/level_audio.c src/place.c src/video.c)
+target_include_directories(bs_audio PUBLIC include)
+target_link_libraries(bs_audio PUBLIC bs_formats SDL3::SDL3 PRIVATE stb_vorbis)
+if(NOT MSVC)
+    target_link_libraries(bs_audio PUBLIC m)
+endif()
+bs_configure_target(bs_audio)

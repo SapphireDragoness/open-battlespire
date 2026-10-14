@@ -64,6 +64,15 @@ bs_result bs_level_renderer_set_water(bs_level_renderer *r, const bs_bsi_image *
 void bs_level_renderer_draw(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int width,
                             int height, double time);
 
+/* Moves a separate object (see bs_scene_build_ex) to a new placement. */
+void bs_level_renderer_place(bs_level_renderer *r, uint32_t object, const float pos[3], const int32_t angles[3]);
+
+/* Shows or hides a separate object. */
+void bs_level_renderer_show(bs_level_renderer *r, uint32_t object, bool visible);
+
+/* Current placements, indexed by level object (for bs_scene_raycast). */
+const bs_scene_xform *bs_level_renderer_xforms(const bs_level_renderer *r);
+
 /* Default settings. */
 bs_render_settings bs_render_settings_default(void);
 

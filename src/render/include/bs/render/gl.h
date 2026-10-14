@@ -108,6 +108,8 @@ typedef ptrdiff_t GLintptr;
     X(void, glActiveTexture, (GLenum unit))                                                         \
     X(void, glTexImage2D, (GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, \
                            GLenum fmt, GLenum type, const void *data))                              \
+    X(void, glTexSubImage2D, (GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,    \
+                              GLenum fmt, GLenum type, const void *data))                           \
     X(void, glTexParameteri, (GLenum target, GLenum pname, GLint param))                            \
     X(void, glGenerateMipmap, (GLenum target))                                                      \
     X(GLuint, glCreateShader, (GLenum type))                                                        \
@@ -183,6 +185,7 @@ BS_GL_FUNCTIONS(BS_GL_DECLARE)
 #define glBindTexture bs_glBindTexture
 #define glActiveTexture bs_glActiveTexture
 #define glTexImage2D bs_glTexImage2D
+#define glTexSubImage2D bs_glTexSubImage2D
 #define glTexParameteri bs_glTexParameteri
 #define glGenerateMipmap bs_glGenerateMipmap
 #define glCreateShader bs_glCreateShader

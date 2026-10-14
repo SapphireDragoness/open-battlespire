@@ -50,6 +50,14 @@ int main(int argc, char **argv)
     err |= write_seed(root, "model", "small", buf, n);
     n = synth_bs6(buf, sizeof buf);
     err |= write_seed(root, "bs6", "small", buf, n);
+    n = synth_bs6_logic(buf, sizeof buf);
+    err |= write_seed(root, "bs6", "logic", buf, n);
+    n = synth_wav(buf, sizeof buf);
+    err |= write_seed(root, "wav", "small", buf, n);
+    n = synth_smk(buf, sizeof buf);
+    err |= write_seed(root, "smk", "small", buf, n);
+    n = synth_nodes(buf, sizeof buf);
+    err |= write_seed(root, "nodes", "small", buf, n);
     n = synth_flc(buf, sizeof buf);
     err |= write_seed(root, "flic", "small", buf, n);
     n = synth_font(buf, sizeof buf);

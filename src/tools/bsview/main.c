@@ -16,7 +16,9 @@
 #include "bs/formats/bs6.h"
 #include "bs/formats/levels.h"
 #include "bs/render/gl.h"
+#include "bs/audio/level_audio.h"
 #include "bs/render/level_renderer.h"
+#include "bs/render/level_view.h"
 
 #define MOUSE_SENSITIVITY 0.0025f
 #define BASE_SPEED 400.0f  /* level units per second */
@@ -36,16 +38,10 @@ typedef struct options {
     float camera[5];     /* x y z yaw pitch (degrees) */
     float fov;           /* vertical field of view, degrees */
     float fog_scale;     /* multiplies the level's fog distances (for comparing with the original) */
+    bool mute;
+    bool no_music;
+    bool fixed_ambience;
 } options;
-
-typedef struct loaded_level {
-    char file[32];
-    const bs_level_info *info;  /* NULL if not in LEVELS.TXT */
-    bs_arena arena;
-    bs_bs6_level level;
-    bs_scene scene;
-    bs_level_renderer *renderer;
-} loaded_level;
 
 typedef struct app {
     bs_install inst;
@@ -54,13 +50,15 @@ typedef struct app {
     bs_assets *assets;
     bs_arena arena;
     bs_level_table levels;
-    loaded_level cur;
-    bool have_level;
+    bs_level_view cur;
     int level_index;     /* index into levels, or -1 */
     bs_camera cam;
     bs_render_settings settings;
     float fog_scale;
     SDL_Window *window;
+    bs_audio *audio;     /* NULL: silent */
+    bs_level_audio sound;
+    bool paused_audio;
 } app;
 
 static void usage(FILE *out)
@@ -76,6 +74,10 @@ static void usage(FILE *out)
             "  --classic           start in classic mode\n"
             "  --markers           show editor markers\n"
             "  --vertex-light      light per vertex instead of per pixel\n"
+            "  --mute              no sound\n"
+            "  --no-music          ambient sounds only\n"
+            "  --fixed-ambience    ambient sounds from a random nearby node (the original picks a\n"
+            "                      fixed node, usually out of earshot)\n"
             "  --size WxH          window size (default 1280x960)\n"
             "  --screenshot FILE   render one frame to FILE (PNG) and exit\n"
             "  --aux PREFIX        with --screenshot, also write PREFIX_unlit.png (no light, fog,\n"
@@ -90,7 +92,8 @@ static void usage(FILE *out)
             "  0                  level start          1-9   viewpoints\n"
             "  F2 classic/enhanced  F3 fog  F4 lighting  F5 markers  F6 sprites  F7 sky  F8 back-face culling\n"
             "  F9 per-vertex/per-pixel light   F10 player light\n"
-            "  + / -              ambient light       P   print camera      F12   screenshot\n");
+            "  + / -              ambient light       P   print camera      F12   screenshot\n"
+            "  M                  sound on/off\n");
 }
 
 /* Returns false on a usage error; sets *help for -h/--help. */
@@ -124,6 +127,12 @@ static bool parse_args(int argc, char **argv, options *o, bool *help)
             o->markers = true;
         else if (strcmp(a, "--vertex-light") == 0)
             o->vertex_light = true;
+        else if (strcmp(a, "--mute") == 0)
+            o->mute = true;
+        else if (strcmp(a, "--no-music") == 0)
+            o->no_music = true;
+        else if (strcmp(a, "--fixed-ambience") == 0)
+            o->fixed_ambience = true;
         else if (strcmp(a, "--screenshot") == 0 && has)
             o->screenshot = argv[++i];
         else if (strcmp(a, "--aux") == 0 && has)
@@ -152,146 +161,24 @@ static bool parse_args(int argc, char **argv, options *o, bool *help)
 
 /* ---- levels ---- */
 
-static void unload_level(app *a)
-{
-    if (!a->have_level)
-        return;
-    bs_level_renderer_destroy(a->cur.renderer);
-    bs_arena_free(&a->cur.arena);
-    memset(&a->cur, 0, sizeof a->cur);
-    a->have_level = false;
-}
-
-static void place_camera(app *a, int view)
-{
-    const bs_bs6_level *lvl = &a->cur.level;
-    a->cam.pitch = 0;
-    a->cam.yaw = 0;
-    if (view >= 0 && (uint32_t)view < lvl->view_count) {
-        for (int c = 0; c < 3; c++)
-            a->cam.pos[c] = (float)lvl->views[view].pos[c];
-        return;
-    }
-    for (uint32_t i = 0; i < lvl->flat_count; i++) {
-        if (bs_strcasecmp(lvl->flats[i].name, "start") == 0) {
-            for (int c = 0; c < 3; c++)
-                a->cam.pos[c] = (float)lvl->flats[i].pos[c];
-            return;
-        }
-    }
-    /* No start marker: the middle of the level, a little above the floor. */
-    for (int c = 0; c < 3; c++)
-        a->cam.pos[c] = (a->cur.scene.min[c] + a->cur.scene.max[c]) * 0.5f;
-}
-
-/* Average colour of an image's bottom rows: the sky at the horizon. */
-static void horizon_color(const bs_bsi_image *sky, float out[3])
-{
-    double sum[3] = {0, 0, 0};
-    uint32_t rows = sky->height < 8 ? sky->height : 8, n = 0;
-    for (uint32_t y = sky->height - rows; y < sky->height; y++)
-        for (uint32_t x = 0; x < sky->width; x++, n++) {
-            uint8_t rgb[3];
-            bs_bsi_pixel_rgb(sky, sky->pixels[(size_t)y * sky->width + x], rgb);
-            for (int c = 0; c < 3; c++)
-                sum[c] += rgb[c];
-        }
-    for (int c = 0; c < 3; c++)
-        out[c] = n ? (float)(sum[c] / n / 255.0) : 0.0f;
-}
-
-/*
- * Full-fog colour of a HAZE.* table: three channel tables (R, G, B), each 32
- * fog levels x 32 input values of u32, where level 0 is full fog. See
- * docs/formats/palettes.md.
- */
-static bool haze_color(app *a, const char *suffix, float out[3])
-{
-    char name[64];
-    snprintf(name, sizeof name, "GAMEDATA/HAZE.%s", suffix);
-    uint8_t *data;
-    size_t size;
-    if (bs_vfs_read(&a->vfs, name, &a->cur.arena, &data, &size) != BS_OK || size < 12288)
-        return false;
-    for (int c = 0; c < 3; c++) {
-        size_t off = (size_t)c * 4096 + 16 * 4; /* channel c, level 0, input 16 */
-        uint32_t v = (uint32_t)data[off] | (uint32_t)data[off + 1] << 8;
-        out[c] = (float)((v >> (10 - 5 * c)) & 31) / 31.0f;
-    }
-    return true;
-}
-
-static void apply_level_settings(app *a)
-{
-    const bs_level_info *info = a->cur.info;
-    /*
-     * Fog, as GAME.EXE sets it up (0x11150, 0x6B778): linear from a start
-     * distance to the level's view distance, towards the full-fog colour of
-     * its HAZE table. The start is view distance - 512 ("F" levels: a fog
-     * wall at the edge of view) or 8 ("C" levels: haze over the whole range).
-     */
-    memset(a->settings.fog_color, 0, sizeof a->settings.fog_color);
-    if (info && info->haze[0] && !haze_color(a, info->haze, a->settings.fog_color)) {
-        const bs_bsi_image *sky = info->sky[0] ? bs_assets_image(a->assets, info->sky) : NULL;
-        if (sky && sky->width && sky->height && sky->pixels)
-            horizon_color(sky, a->settings.fog_color);
-    }
-    float view = info && info->view_distance > 0 ? (float)info->view_distance : 6000.0f;
-    bool gradual = info && info->mode[2] == 'C';
-    /*
-     * "F" levels: verified against two memory dumps of level 1 (the decoded
-     * distances fit; scaling them by 2 or 3 fits worse). "C" levels: the
-     * decoded rule gives fog about 3x too dense against a screenshot of level 5
-     * (UESP "Point E", camera 14384,-400,32696); 3 is fitted, not derived, and
-     * the start value for "C" levels may be misread (0x1122F).
-     */
-    float scale = a->fog_scale > 0.0f ? a->fog_scale : (gradual ? 3.0f : 1.0f);
-    a->settings.fog_end = view * scale;
-    a->settings.fog_start = (gradual ? 8.0f : view - 512.0f) * scale;
-    /*
-     * Ambient light: LEVELS.TXT field 7 in 1/512ths of a shade level,
-     * clamped to 16128 (RE: 0x6F20D, 0x8D013; measured against the original:
-     * 1024 = 2 levels in level 1). The clear outdoor levels (31000) are fully lit.
-     */
-    int32_t amb = info ? info->ambient : 0;
-    if (amb > 16128)
-        amb = 16128;
-    if (amb < 0)
-        amb = 0;
-    a->settings.ambient = (float)amb / 512.0f / 31.0f;
-}
-
 static bool load_level(app *a, const char *file, const bs_level_info *info)
 {
-    unload_level(a);
-    loaded_level *l = &a->cur;
-    snprintf(l->file, sizeof l->file, "%s", file);
-    l->info = info;
-    bs_arena_init(&l->arena, 0);
-    uint8_t *data;
-    size_t size;
-    bs_result r = bs_assets_read(a->assets, file, &l->arena, &data, &size);
-    if (r == BS_OK)
-        r = bs_bs6_parse(data, size, &l->arena, &l->level);
-    if (r == BS_OK)
-        r = bs_scene_build(a->assets, &l->level, &l->arena, &l->scene);
-    const bs_bsi_image *sky = info && info->sky[0] ? bs_assets_image(a->assets, info->sky) : NULL;
-    if (r == BS_OK)
-        r = bs_level_renderer_create(&l->scene, &l->level, sky, &l->renderer);
+    bs_result r = bs_level_view_load(&a->cur, a->assets, &a->vfs, file, info, a->fog_scale, &a->settings);
     if (r != BS_OK) {
         fprintf(stderr, "bsview: cannot load %s: %s\n", file, bs_result_str(r));
-        bs_arena_free(&l->arena);
         return false;
     }
-    a->have_level = true;
-    apply_level_settings(a);
-    /* Water: LEVELS.TXT mode[1] 'Y' loads water2.bsi (RE: 0x262AC); the height is the level's WATR. */
-    if (info && info->mode[1] == 'Y')
-        bs_level_renderer_set_water(l->renderer, bs_assets_image(a->assets, "water2.bsi"), (float)l->level.water);
+    bs_level_audio_start(&a->sound, info);
+    const bs_level_view *l = &a->cur;
     printf("%s%s%s: %u triangles, %u materials, %u lights, %u flats\n", file, info ? " - " : "",
            info ? info->name : "", l->scene.vertex_count / 3, l->scene.material_count, l->level.light_count,
            l->level.flat_count);
     return true;
+}
+
+static void place_camera(app *a, int view)
+{
+    bs_level_view_place_camera(&a->cur, view, &a->cam);
 }
 
 static bool load_index(app *a, int index)
@@ -382,15 +269,10 @@ static void move_camera(app *a, float dt)
         speed *= 4;
     if (keys[SDL_SCANCODE_LCTRL] || keys[SDL_SCANCODE_RCTRL])
         speed *= 0.25f;
-    float cy = cosf(a->cam.yaw), sy = sinf(a->cam.yaw), cp = cosf(a->cam.pitch), sp = sinf(a->cam.pitch);
-    float fwd[3] = {sy * cp, -sp, cy * cp};
-    float right[3] = {cy, 0, -sy};
     float f = (float)((keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) - (keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN]));
     float s = (float)((keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) - (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]));
     float u = (float)(keys[SDL_SCANCODE_SPACE] - keys[SDL_SCANCODE_C]);
-    for (int c = 0; c < 3; c++)
-        a->cam.pos[c] += (fwd[c] * f + right[c] * s) * speed * dt;
-    a->cam.pos[1] -= u * speed * dt; /* up is -y */
+    bs_camera_fly(&a->cam, f, s, u, speed * dt);
 }
 
 static void key_down(app *a, SDL_Keycode key, int w, int h, bool *quit)
@@ -416,6 +298,11 @@ static void key_down(app *a, SDL_Keycode key, int w, int h, bool *quit)
     case SDLK_KP_PLUS: s->ambient = fminf(s->ambient + 0.05f, 1.5f); break;
     case SDLK_MINUS:
     case SDLK_KP_MINUS: s->ambient = fmaxf(s->ambient - 0.05f, 0.0f); break;
+    case SDLK_M:
+        a->paused_audio = !a->paused_audio;
+        if (a->audio)
+            bs_audio_pause(a->audio, a->paused_audio);
+        break;
     case SDLK_PAGEUP: load_index(a, a->level_index - 1); break;
     case SDLK_PAGEDOWN: load_index(a, a->level_index + 1); break;
     case SDLK_P:
@@ -493,10 +380,18 @@ int main(int argc, char **argv)
     if (!open_data(&a, o.data_dir))
         return 1;
 
+    bool sound = !o.mute && !o.screenshot;
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "bsview: SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
+    if (sound && (!SDL_InitSubSystem(SDL_INIT_AUDIO) || bs_audio_open(&a.audio) != BS_OK)) {
+        BS_WARN("no audio device: running silent");
+        a.audio = NULL;
+    }
+    bs_level_audio_open(&a.sound, a.audio, &a.vfs);
+    a.sound.music = !o.no_music;
+    a.sound.fixed_ambience = o.fixed_ambience;
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -563,6 +458,8 @@ int main(int argc, char **argv)
         float dt = (float)(now - last) / 1e9f;
         last = now;
         move_camera(&a, dt > 0.1f ? 0.1f : dt);
+        if (!a.paused_audio)
+            bs_level_audio_update(&a.sound, a.cam.pos, a.cam.yaw, dt);
 
         bs_level_renderer_draw(a.cur.renderer, &a.cam, &a.settings, w, h, (double)(now - start) / 1e9);
         if (o.screenshot) {
@@ -574,7 +471,9 @@ int main(int argc, char **argv)
         SDL_GL_SwapWindow(a.window);
     }
 
-    unload_level(&a);
+    bs_level_view_unload(&a.cur);
+    bs_level_audio_close(&a.sound);
+    bs_audio_close(a.audio);
     SDL_GL_DestroyContext(ctx);
     SDL_DestroyWindow(a.window);
     SDL_Quit();

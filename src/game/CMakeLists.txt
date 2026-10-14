@@ -1,0 +1,7 @@
+add_library(bs_game STATIC src/collision.c src/level_logic.c src/player.c)
+target_include_directories(bs_game PUBLIC include)
+target_link_libraries(bs_game PUBLIC bs_assets)
+if(NOT MSVC)
+    target_link_libraries(bs_game PUBLIC m)
+endif()
+bs_configure_target(bs_game)

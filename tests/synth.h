@@ -106,4 +106,38 @@ size_t synth_model(uint8_t *out, size_t cap);
  */
 size_t synth_bs6(uint8_t *out, size_t cap);
 
+/* WAV: PCM 8-bit mono 11025 Hz with an extra LIST chunk; 10 samples 128..137. */
+size_t synth_wav(uint8_t *out, size_t cap);
+
+/*
+ * Smacker: SMK2, 4x4, 2 frames at 100 ms. Trees: MMAP/MCLR/FULL absent, TYPE a
+ * single leaf 0x5503 (solid block, colour 0x55). Frame 0 sets palette entry
+ * 0x55 to (63, 0, 0); frame 1 has 4 bytes of uncompressed audio {1, 2, 3, 4}
+ * on track 0 (8-bit mono 11025 Hz).
+ */
+size_t synth_smk(uint8_t *out, size_t cap);
+
+/*
+ * NODES file with 3 nodes:
+ *   0 at (1, -2, 3), group 7, links to 1 (distance 10) and 2 (distance 20)
+ *   1 at (11, -2, 3), group 7, no links
+ *   2 at (1, -2, 23), group 9, links back to 0 (distance 20)
+ */
+size_t synth_nodes(uint8_t *out, size_t cap);
+
+/*
+ * BS6 level exercising the logic chunks (models "box", "rug"; all objects use box):
+ *   #10 button at (0,0,0): CTRL 16 (use), STRU 121 [72, 1], LINK 0 -> #11
+ *   #11 door at (100,0,0): CTRL 512 [0, -512, 0, 1000 ms, "r"]
+ *   #12 lift at (200,0,0): CTRL 5 (step on), CTRL 261 [0, -500, 0, 2000 ms, "r"]
+ *   #13 wheel at (300,0,0): CTRL 16, CTRL 512 [0, 2047, 0, 500 ms, "c"]
+ *   #14 portal at (400,0,0): CTRL 5, LINK 2 -> flat #20
+ *   #15 at (500,0,0): CTRL 261 [10, 0, 0, 100 ms, ""], CTRL 149 [0, 300], LINK 0 -> #16
+ *   #16 at (600,0,0): CTRL 261 [0, 10, 0, 100 ms, ""], CTRL 149 [0, 300], LINK 0 -> #15
+ *   #17 one-shot at (700,0,0): CTRL 16, CTRL 261 [0, 0, 50, 100 ms, ""]
+ *   flat #20 "user" at (1000,0,0): CTRL 261 [50, -20, 30, 0 ms, ""]
+ *   flat #21 "start" at (0,-100,0)
+ */
+size_t synth_bs6_logic(uint8_t *out, size_t cap);
+
 #endif

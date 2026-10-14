@@ -59,6 +59,7 @@ static const char *const geometry_vs =
     "layout(location = 2) in vec2 a_uv;\n"
     "layout(location = 3) in float a_face_byte;\n"
     "uniform mat4 u_mvp;\n"
+    "uniform mat4 u_model;\n"   /* separate objects: model space to level; otherwise identity */
     "uniform int u_vertex_light;\n"
     LIGHT_GLSL
     "out vec3 v_pos;\n"
@@ -67,12 +68,12 @@ static const char *const geometry_vs =
     "out float v_light;\n"
     "flat out float v_face_byte;\n"
     "void main() {\n"
-    "    v_pos = a_pos;\n"
-    "    v_normal = a_normal;\n"
+    "    v_pos = (u_model * vec4(a_pos, 1.0)).xyz;\n"
+    "    v_normal = mat3(u_model) * a_normal;\n"
     "    v_face_byte = a_face_byte;\n"
-    "    v_light = u_vertex_light != 0 ? light_at(a_pos, a_normal) : -1.0;\n"
+    "    v_light = u_vertex_light != 0 ? light_at(v_pos, v_normal) : -1.0;\n"
     "    v_uv = a_uv;\n"
-    "    gl_Position = u_mvp * vec4(a_pos, 1.0);\n"
+    "    gl_Position = u_mvp * vec4(v_pos, 1.0);\n"
     "}\n";
 
 /* Billboards: a_pos.xy is the corner in [-0.5, 0.5]. */
@@ -195,13 +196,16 @@ typedef struct gpu_sprite {
 
 typedef struct program {
     GLuint id;
-    GLint mvp, tex, textured, color, eye, lighting, classic, ambient, fog, fog_range, fog_color, light_count, debug;
+    GLint mvp, model, tex, textured, color, eye, lighting, classic, ambient, fog, fog_range, fog_color, light_count, debug;
     GLint vertex_light, player_light, player_brightness;
     GLint center, size, right, up, frame;
 } program;
 
 struct bs_level_renderer {
     const bs_scene *scene;
+    bs_scene_xform *xforms;   /* per level object: placement of separate objects */
+    bool *hidden;             /* per level object */
+    uint32_t object_count;
     program geometry, sprite;
     GLuint sky_program;
     GLint sky_tex, sky_fwd, sky_right, sky_up, sky_tan, sky_repeats, sky_fog, sky_fog_on;
@@ -266,6 +270,7 @@ static bool make_program(program *p, const char *vs)
     if (!p->id)
         return false;
     p->mvp = glGetUniformLocation(p->id, "u_mvp");
+    p->model = glGetUniformLocation(p->id, "u_model");
     p->tex = glGetUniformLocation(p->id, "u_tex");
     p->textured = glGetUniformLocation(p->id, "u_textured");
     p->color = glGetUniformLocation(p->id, "u_color");
@@ -419,9 +424,17 @@ bs_result bs_level_renderer_create(const bs_scene *scene, const bs_bs6_level *le
     if (!r)
         return BS_ERR_NOMEM;
     r->scene = scene;
+    r->object_count = level->object_count;
+    r->xforms = calloc(level->object_count + 1, sizeof *r->xforms);
+    r->hidden = calloc(level->object_count + 1, sizeof *r->hidden);
+    for (uint32_t i = 0; r->xforms && i < level->object_count; i++) {
+        const bs_bs6_object *o = &level->objects[i];
+        float pos[3] = {(float)o->pos[0], (float)o->pos[1], (float)o->pos[2]};
+        r->xforms[i] = bs_scene_object_xform(o->angles, pos);
+    }
     r->materials = calloc(scene->material_count + 1, sizeof *r->materials);
     r->sprites = calloc(scene->sprite_count + 1, sizeof *r->sprites);
-    if (!r->materials || !r->sprites) {
+    if (!r->materials || !r->sprites || !r->xforms || !r->hidden) {
         bs_level_renderer_destroy(r);
         return BS_ERR_NOMEM;
     }
@@ -531,6 +544,8 @@ void bs_level_renderer_destroy(bs_level_renderer *r)
     glDeleteVertexArrays(1, &r->vao);
     glDeleteVertexArrays(1, &r->quad_vao);
     glDeleteVertexArrays(1, &r->empty_vao);
+    free(r->xforms);
+    free(r->hidden);
     glDeleteProgram(r->geometry.id);
     glDeleteProgram(r->sprite.id);
     glDeleteProgram(r->sky_program);
@@ -598,11 +613,29 @@ static void view_projection(const bs_camera *cam, float aspect, float out[16])
     mat4_mul(proj, view, out);
 }
 
+static const float identity4[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+
+/* Column-major model matrix of an object placement. */
+static void xform_matrix(const bs_scene_xform *x, float m[16])
+{
+    for (int c = 0; c < 3; c++) {
+        for (int rr = 0; rr < 3; rr++)
+            m[c * 4 + rr] = x->rot[rr * 3 + c];
+        m[c * 4 + 3] = 0;
+    }
+    m[12] = x->pos[0];
+    m[13] = x->pos[1];
+    m[14] = x->pos[2];
+    m[15] = 1;
+}
+
 static void set_shading(const program *p, const bs_level_renderer *r, const bs_camera *cam,
                         const bs_render_settings *s, const float mvp[16])
 {
     glUseProgram(p->id);
     glUniformMatrix4fv(p->mvp, 1, GL_FALSE, mvp);
+    if (p->model >= 0)
+        glUniformMatrix4fv(p->model, 1, GL_FALSE, identity4);
     glUniform1i(p->tex, 0);
     glUniform3f(p->eye, cam->pos[0], cam->pos[1], cam->pos[2]);
     glUniform1i(p->lighting, s->lighting);
@@ -666,15 +699,28 @@ static void draw_scene(bs_level_renderer *r, const bs_camera *cam, const bs_rend
      * together keeps handedness, so model winding stays counter-clockwise. */
     set_shading(&r->geometry, r, cam, s, mvp);
     glBindVertexArray(r->vao);
+    int32_t placed = -1;
     for (uint32_t i = 0; i < r->scene->batch_count; i++) {
         const bs_scene_batch *b = &r->scene->batches[i];
         const gpu_material *m = &r->materials[b->material];
+        if (b->object >= 0 && (uint32_t)b->object < r->object_count && r->hidden[b->object])
+            continue;
+        if (b->object != placed) {
+            float model[16];
+            memcpy(model, identity4, sizeof model);
+            if (b->object >= 0 && (uint32_t)b->object < r->object_count)
+                xform_matrix(&r->xforms[b->object], model);
+            glUniformMatrix4fv(r->geometry.model, 1, GL_FALSE, b->object >= 0 ? model : identity4);
+            placed = b->object;
+        }
         glUniform1i(r->geometry.textured, m->texture != 0);
         glUniform4f(r->geometry.color, m->color[0], m->color[1], m->color[2], m->color[3]);
         glBindTexture(GL_TEXTURE_2D, m->texture);
         glDrawArrays(GL_TRIANGLES, (GLint)b->first, (GLsizei)b->count);
     }
 
+    if (placed != -1)
+        glUniformMatrix4fv(r->geometry.model, 1, GL_FALSE, identity4);
     if (r->water_vao) {
         glDisable(GL_CULL_FACE); /* visible from below too */
         glUniform1i(r->geometry.textured, 1);
@@ -779,4 +825,21 @@ bs_result bs_level_renderer_set_water(bs_level_renderer *r, const bs_bsi_image *
     glEnableVertexAttribArray(3);
     glBindVertexArray(0);
     return BS_OK;
+}
+
+void bs_level_renderer_place(bs_level_renderer *r, uint32_t object, const float pos[3], const int32_t angles[3])
+{
+    if (object < r->object_count)
+        r->xforms[object] = bs_scene_object_xform(angles, pos);
+}
+
+const bs_scene_xform *bs_level_renderer_xforms(const bs_level_renderer *r)
+{
+    return r->xforms;
+}
+
+void bs_level_renderer_show(bs_level_renderer *r, uint32_t object, bool visible)
+{
+    if (object < r->object_count)
+        r->hidden[object] = !visible;
 }

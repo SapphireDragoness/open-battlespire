@@ -1,5 +1,6 @@
 #include "synth.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 /* Little-endian writer over a fixed buffer; sets ok = 0 on overflow. */
@@ -659,5 +660,249 @@ size_t synth_bs6(uint8_t *out, size_t cap)
     le_chunk_end(&b, flas);
 
     le_chunk_end(&b, gnrl);
+    return done(&b);
+}
+
+static void le_ctrl(w *b, int32_t type, const int32_t *v, int n, const char *opts)
+{
+    size_t c = le_chunk_begin(b, "CTRL");
+    le_i32(b, "IDNB", type);
+    put(b, "RAWD", 4);
+    bool move = type == 261 || type == 512;
+    u32(b, move ? 32u : 24u);
+    for (int i = 0; i < (move ? 4 : 6); i++)
+        u32(b, (uint32_t)(i < n ? v[i] : 0));
+    if (move) {
+        char text[16] = {0};
+        if (opts)
+            memcpy(text, opts, strlen(opts));
+        put(b, text, 16);
+    }
+    le_chunk_end(b, c);
+}
+
+static void le_link(w *b, int32_t type, int32_t target)
+{
+    size_t c = le_chunk_begin(b, "LINK");
+    le_i32(b, "IDTY", type);
+    le_i32(b, "IDNB", target);
+    le_chunk_end(b, c);
+}
+
+static size_t le_object_begin(w *b, int32_t id, int32_t x)
+{
+    size_t o = le_chunk_begin(b, "OBJD");
+    le_i32(b, "IDNB", id);
+    le_i32(b, "IDFI", 0);
+    const int32_t pos[3] = { x, 0, 0 }, ang[3] = { 0, 0, 0 };
+    le_i32s(b, "POSI", pos, 3);
+    le_i32s(b, "ANGS", ang, 3);
+    le_i32(b, "SELE", 0);
+    return o;
+}
+
+size_t synth_bs6_logic(uint8_t *out, size_t cap)
+{
+    w b = { out, 0, cap, 1 };
+    size_t gnrl = le_chunk_begin(&b, "GNRL");
+    size_t objs = le_chunk_begin(&b, "OBJS");
+    put(&b, "LFIL", 4);
+    u32(&b, 520);
+    put(&b, "box", 3);
+    fill(&b, 0, 257);
+    put(&b, "rug", 3);
+    fill(&b, 0, 257);
+
+    size_t o = le_object_begin(&b, 10, 0);
+    le_ctrl(&b, 16, NULL, 0, NULL);
+    size_t st = le_chunk_begin(&b, "STRU");
+    le_i32(&b, "IDNB", 121);
+    put(&b, "RAWD", 4);
+    u32(&b, 8);
+    u32(&b, 72);
+    u32(&b, 1);
+    le_chunk_end(&b, st);
+    le_link(&b, 0, 11);
+    le_chunk_end(&b, o);
+
+    static const int32_t door[] = { 0, -512, 0, 1000 }, lift[] = { 0, -500, 0, 2000 },
+                         wheel[] = { 0, 2047, 0, 500 }, a[] = { 10, 0, 0, 100 }, bb[] = { 0, 10, 0, 100 },
+                         once[] = { 0, 0, 50, 100 }, timer[] = { 0, 300 }, tele[] = { 50, -20, 30, 0 };
+    o = le_object_begin(&b, 11, 100);
+    le_ctrl(&b, 512, door, 4, "r");
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 12, 200);
+    le_ctrl(&b, 5, NULL, 0, NULL);
+    le_ctrl(&b, 261, lift, 4, "r");
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 13, 300);
+    le_ctrl(&b, 16, NULL, 0, NULL);
+    le_ctrl(&b, 512, wheel, 4, "c");
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 14, 400);
+    le_ctrl(&b, 5, NULL, 0, NULL);
+    le_link(&b, 2, 20);
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 15, 500);
+    le_ctrl(&b, 261, a, 4, "");
+    le_ctrl(&b, 149, timer, 2, NULL);
+    le_link(&b, 0, 16);
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 16, 600);
+    le_ctrl(&b, 261, bb, 4, "");
+    le_ctrl(&b, 149, timer, 2, NULL);
+    le_link(&b, 0, 15);
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 17, 700);
+    le_ctrl(&b, 16, NULL, 0, NULL);
+    le_ctrl(&b, 261, once, 4, "");
+    le_chunk_end(&b, o);
+    le_chunk_end(&b, objs);
+
+    size_t flas = le_chunk_begin(&b, "FLAS");
+    size_t flat = le_chunk_begin(&b, "FLAD");
+    le_i32(&b, "IDNB", 20);
+    le_name(&b, "FILN", "user");
+    static const int32_t upos[3] = { 1000, 0, 0 }, spos[3] = { 0, -100, 0 };
+    le_i32s(&b, "POSI", upos, 3);
+    le_i32(&b, "SCAL", 0);
+    le_i32(&b, "AMBI", 0);
+    le_i32(&b, "SELE", 0);
+    le_ctrl(&b, 261, tele, 4, "");
+    le_chunk_end(&b, flat);
+    flat = le_chunk_begin(&b, "FLAD");
+    le_i32(&b, "IDNB", 21);
+    le_name(&b, "FILN", "start");
+    le_i32s(&b, "POSI", spos, 3);
+    le_i32(&b, "SCAL", 0);
+    le_i32(&b, "AMBI", 0);
+    le_i32(&b, "SELE", 0);
+    le_chunk_end(&b, flat);
+    le_chunk_end(&b, flas);
+    le_chunk_end(&b, gnrl);
+    return done(&b);
+}
+
+/* ---- WAV ---- */
+
+size_t synth_wav(uint8_t *out, size_t cap)
+{
+    w b = { out, 0, cap, 1 };
+    put(&b, "RIFF", 4);
+    u32(&b, 4 + 8 + 16 + 8 + 10 + 8 + 2);
+    put(&b, "WAVE", 4);
+    put(&b, "fmt ", 4);
+    u32(&b, 16);
+    u16(&b, 1);      /* PCM */
+    u16(&b, 1);      /* mono */
+    u32(&b, 11025);
+    u32(&b, 11025);
+    u16(&b, 1);
+    u16(&b, 8);
+    put(&b, "LIST", 4); /* an extra chunk to skip */
+    u32(&b, 2);
+    put(&b, "xx", 2);
+    put(&b, "data", 4);
+    u32(&b, 10);
+    for (int i = 0; i < 10; i++)
+        u8(&b, (uint8_t)(128 + i));
+    return done(&b);
+}
+
+/* ---- Smacker ---- */
+
+typedef struct bitw {
+    uint8_t buf[64];
+    size_t bits;
+} bitw;
+
+static void putb(bitw *bw, uint32_t v, int n)
+{
+    for (int i = 0; i < n; i++, bw->bits++)
+        if ((v >> i) & 1u)
+            bw->buf[bw->bits >> 3] |= (uint8_t)(1u << (bw->bits & 7));
+}
+
+size_t synth_smk(uint8_t *out, size_t cap)
+{
+    /* Trees: MMAP, MCLR, FULL absent; TYPE = one leaf 0x5503 (solid block, colour 0x55, run 1). */
+    bitw t = { {0}, 0 };
+    putb(&t, 0, 1);
+    putb(&t, 0, 1);
+    putb(&t, 0, 1);
+    putb(&t, 1, 1);                     /* TYPE present */
+    putb(&t, 1, 1); putb(&t, 0, 1); putb(&t, 0x03, 8); putb(&t, 0, 1);  /* low byte tree */
+    putb(&t, 1, 1); putb(&t, 0, 1); putb(&t, 0x55, 8); putb(&t, 0, 1);  /* high byte tree */
+    putb(&t, 0x1111, 16); putb(&t, 0x2222, 16); putb(&t, 0x3333, 16);    /* escapes */
+    putb(&t, 0, 1);                     /* big tree: a single leaf */
+    putb(&t, 0, 1);
+    uint32_t trees = (uint32_t)((t.bits + 7) / 8);
+
+    w b = { out, 0, cap, 1 };
+    put(&b, "SMK2", 4);
+    u32(&b, 4);       /* width */
+    u32(&b, 4);       /* height */
+    u32(&b, 2);       /* frames */
+    u32(&b, 100);     /* ms per frame */
+    u32(&b, 0);       /* flags */
+    for (int i = 0; i < 7; i++)
+        u32(&b, i == 0 ? 4 : 0);   /* max audio bytes per track */
+    u32(&b, trees);
+    u32(&b, 16);      /* MMAP size */
+    u32(&b, 16);      /* MCLR size */
+    u32(&b, 16);      /* FULL size */
+    u32(&b, 16);      /* TYPE size */
+    u32(&b, 0x40000000u | 11025);  /* track 0: present, uncompressed 8-bit mono */
+    for (int i = 1; i < 7; i++)
+        u32(&b, 0);
+    u32(&b, 0);
+    u32(&b, 8);       /* frame 0: palette (8 bytes), empty video bitstream */
+    u32(&b, 8);       /* frame 1: audio (8 bytes) */
+    u8(&b, 1);        /* frame 0 type: palette */
+    u8(&b, 2);        /* frame 1 type: audio track 0 */
+    put(&b, t.buf, trees);
+    /* frame 0 palette: skip 85 entries, entry 0x55 = (63, 0, 0), skip the rest */
+    static const uint8_t pal[8] = { 2, 0x80 | 84, 63, 0, 0, 0xFF, 0x80 | 41, 0 };
+    put(&b, pal, sizeof pal);
+    /* frame 1 audio: length (incl. itself) + 4 bytes */
+    u32(&b, 8);
+    put(&b, "\x01\x02\x03\x04", 4);
+    return done(&b);
+}
+
+static void f32(w *b, float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof u);
+    u32(b, u);
+}
+
+static void nav_node(w *b, uint16_t index, float x, float y, float z, uint16_t group, int links,
+                     const uint16_t *pairs)
+{
+    u32(b, 0x25u + 4u * (uint32_t)links);
+    u32(b, 0x01D5B028);   /* saved pointers */
+    u32(b, 0x01D5B028);
+    f32(b, x);
+    f32(b, y);
+    f32(b, z);
+    u32(b, 123);
+    u32(b, 0x5E5E5E5E);
+    u32(b, 0);
+    u16(b, group);
+    u16(b, index);
+    u8(b, (uint8_t)links);
+    for (int i = 0; i < links * 2; i++)
+        u16(b, pairs[i]);
+}
+
+size_t synth_nodes(uint8_t *out, size_t cap)
+{
+    w b = { out, 0, cap, 1 };
+    static const uint16_t l0[] = { 10, 1, 20, 2 }, l2[] = { 20, 0 };
+    u32(&b, 3);
+    nav_node(&b, 0, 1, -2, 3, 7, 2, l0);
+    nav_node(&b, 1, 11, -2, 3, 7, 0, NULL);
+    nav_node(&b, 2, 1, -2, 23, 9, 1, l2);
     return done(&b);
 }

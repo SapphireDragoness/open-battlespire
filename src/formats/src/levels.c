@@ -124,3 +124,14 @@ bs_result bs_levels_parse(const uint8_t *text, size_t size, bs_arena *arena, bs_
     out->count = count;
     return BS_OK;
 }
+
+int bs_level_number(const bs_level_info *l)
+{
+    if (bs_level_game_type(l) != BS_GAME_CAMPAIGN)
+        return 4;
+    char c = l->file[1]; /* "l1.bs6" */
+    if (c < '0' || c > '9')
+        return 0;
+    int n = c - '0';
+    return n == 2 ? 3 : n == 3 ? 2 : n == 7 ? 8 : n;
+}

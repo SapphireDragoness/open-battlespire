@@ -51,4 +51,24 @@ static inline bs_game_type bs_level_game_type(const bs_level_info *l)
     return (bs_game_type)l->mode[0];
 }
 
+/*
+ * The game's level number (global 0xDA43A, RE in docs/formats/levels_txt.md).
+ * Campaign levels are 1-6 and 8: the file's digit, with l2/l3 swapped (they
+ * are played in the other order), and 7 raised to 8 (the game skips level
+ * number 7, which also loads l8.bs6). Every multiplayer level is 4. Returns
+ * 0 if a campaign file name has no digit.
+ */
+int bs_level_number(const bs_level_info *l);
+
+/*
+ * The CD audio track a level plays: level number + 1 (MUSIC/TrackNN.ogg).
+ * The final level (number 8) asks for track 9, which the disc does not have,
+ * so it is silent in the original.
+ */
+static inline int bs_level_music_track(const bs_level_info *l)
+{
+    int n = bs_level_number(l);
+    return n ? n + 1 : 0;
+}
+
 #endif

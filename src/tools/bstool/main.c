@@ -17,6 +17,7 @@ static const bstool_command commands[] = {
     { "get",     "<path> [-o file]",           "copy a file out of the install or CD image", cmd_get },
     { "bsi",     "[-o dir] [record...]",       "print BSI image headers, or export them as PNG", cmd_bsi },
     { "flc",     "[-o dir] [record...]",       "decode and check FLIC animations, export frames as PNG", cmd_flc },
+    { "smk",     "[-o dir] [--cut N] [video...]", "decode and check Smacker videos, export frames and audio", cmd_smk },
     { "fnt",     "[-o dir]",                   "print game fonts, export glyph sheets as PNG", cmd_fnt },
     { "model",   "[-o dir] [name...]",         "print 3D model summaries, or export models as glTF", cmd_model },
     { "level",   "[-o dir] [--tree] <name...>", "print BS6 level summaries, or export levels as glTF", cmd_level },

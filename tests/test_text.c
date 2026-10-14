@@ -74,7 +74,24 @@ static void test_levels(void)
         BS_CHECK(strcmp(l->sky, "sky1.bsi") == 0 && l->nodes[0] == '\0');
         BS_CHECK(strcmp(l->name, "Castle flag capture (foggy)") == 0);
         BS_CHECK(bs_level_game_type(l) == BS_GAME_CTF);
+        BS_CHECK_EQ_INT(bs_level_number(l), 4);
+        BS_CHECK_EQ_INT(bs_level_music_track(l), 5);
     }
+
+    /* Level numbers: l2/l3 swap, 7 becomes 8. */
+    bs_level_info li = {.file = "l1.bs6", .mode = "NNF"};
+    BS_CHECK_EQ_INT(bs_level_number(&li), 1);
+    BS_CHECK_EQ_INT(bs_level_music_track(&li), 2);
+    li.file[1] = '2';
+    BS_CHECK_EQ_INT(bs_level_number(&li), 3);
+    li.file[1] = '3';
+    BS_CHECK_EQ_INT(bs_level_number(&li), 2);
+    li.file[1] = '7';
+    BS_CHECK_EQ_INT(bs_level_number(&li), 8);
+    li.file[1] = '8';
+    BS_CHECK_EQ_INT(bs_level_music_track(&li), 9);
+    li.file[1] = 'x';
+    BS_CHECK_EQ_INT(bs_level_music_track(&li), 0);
 
     static const char bad[] = "l1.bs6 Lv1 notanumber NNF xxxx 555 1024 nodes.l1 1500 4096 80 Name\n";
     BS_CHECK_EQ_INT(bs_levels_parse((const uint8_t *)bad, sizeof bad - 1, &a, &t), BS_ERR_FORMAT);

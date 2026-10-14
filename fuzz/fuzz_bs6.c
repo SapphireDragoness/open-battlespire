@@ -1,4 +1,4 @@
-/* Fuzzes BS6 level parsing and the generic chunk iterator. */
+/* Fuzzes BS6 level parsing, the generic chunk iterator and the entity logic reader. */
 #include "bs/formats/bs6.h"
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
@@ -29,6 +29,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             float m[9];
             bs_bs6_rotation(l.objects[i].angles, m);
             sink += (size_t)l.model_names[l.objects[i].model][0] + (size_t)(m[0] > 0);
+            bs_bs6_logic g;
+            if (bs_bs6_entity_logic(&l.objects[i].chunk, &a, &g) == BS_OK)
+                for (uint32_t k = 0; k < g.ctrl_count; k++)
+                    sink += (size_t)bs_bs6_record_i32(&g.ctrls[k], k) + g.ctrls[k].size;
         }
         for (uint32_t i = 0; i < l.flat_count; i++)
             sink += (size_t)l.flats[i].name[0];

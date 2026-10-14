@@ -31,6 +31,7 @@ int cmd_levels(int argc, char **argv);
 int cmd_rsc(int argc, char **argv);
 int cmd_cdls(int argc, char **argv);
 int cmd_get(int argc, char **argv);
+int cmd_smk(int argc, char **argv);
 int cmd_le2elf(int argc, char **argv);
 int cmd_bsi(int argc, char **argv);
 int cmd_flc(int argc, char **argv);

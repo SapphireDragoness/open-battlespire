@@ -1,4 +1,4 @@
-/* 3D models and BS6 levels on synthetic data. */
+/* 3D models, BS6 levels and NODES graphs on synthetic data. */
 
 #include <math.h>
 #include <string.h>
@@ -6,6 +6,7 @@
 #include "bs/core/strmap.h"
 #include "bs/formats/bs6.h"
 #include "bs/formats/model.h"
+#include "bs/formats/nodes.h"
 #include "bs_test.h"
 #include "synth.h"
 
@@ -182,6 +183,84 @@ static void test_rotation(void)
     BS_CHECK(near(m[0], 1) && near(m[4], 1) && near(m[8], 1));
 }
 
+static void test_bs6_logic(void)
+{
+    static uint8_t lv[8192];
+    size_t n = synth_bs6_logic(lv, sizeof lv);
+    BS_CHECK(n > 0);
+    bs_arena arena;
+    bs_arena_init(&arena, 0);
+    bs_bs6_level l;
+    BS_CHECK_EQ_INT(bs_bs6_parse(lv, n, &arena, &l), BS_OK);
+    BS_CHECK_EQ_INT(l.object_count, 8);
+    bs_bs6_logic g;
+    BS_CHECK_EQ_INT(bs_bs6_entity_logic(&l.objects[0].chunk, &arena, &g), BS_OK);
+    BS_CHECK_EQ_INT(g.ctrl_count, 1);
+    BS_CHECK_EQ_INT(g.ctrls[0].id, 16);
+    BS_CHECK_EQ_INT(g.ctrls[0].size, 24);
+    BS_CHECK_EQ_INT(g.prop_count, 1);
+    const bs_bs6_record *snd = bs_bs6_logic_prop(&g, 121);
+    BS_CHECK(snd && bs_bs6_record_i32(snd, 0) == 72 && bs_bs6_record_i32(snd, 1) == 1);
+    BS_CHECK_EQ_INT(bs_bs6_record_i32(snd, 2), 0); /* past the end */
+    BS_CHECK(bs_bs6_logic_prop(&g, 999) == NULL);
+    BS_CHECK_EQ_INT(g.link_count, 1);
+    BS_CHECK(g.links[0].type == 0 && g.links[0].target == 11);
+
+    BS_CHECK_EQ_INT(bs_bs6_entity_logic(&l.objects[1].chunk, &arena, &g), BS_OK);
+    BS_CHECK(g.ctrl_count == 1 && g.ctrls[0].id == 512 && g.ctrls[0].size == 32);
+    BS_CHECK_EQ_INT(bs_bs6_record_i32(&g.ctrls[0], 1), -512);
+    BS_CHECK_EQ_INT(bs_bs6_record_i32(&g.ctrls[0], 3), 1000);
+    BS_CHECK(g.ctrls[0].data[16] == 'r' && g.ctrls[0].data[17] == 0);
+
+    BS_CHECK_EQ_INT(bs_bs6_entity_logic(&l.flats[0].chunk, &arena, &g), BS_OK);
+    BS_CHECK(g.ctrl_count == 1 && g.ctrls[0].id == 261 && bs_bs6_record_i32(&g.ctrls[0], 0) == 50);
+
+    /* An entity with no logic. */
+    BS_CHECK_EQ_INT(bs_bs6_entity_logic(&l.flats[1].chunk, &arena, &g), BS_OK);
+    BS_CHECK(g.prop_count == 0 && g.ctrl_count == 0 && g.link_count == 0);
+
+    /* A CTRL without RAWD is malformed. */
+    static const uint8_t bad[] = {'C', 'T', 'R', 'L', 12, 0, 0, 0, 'I', 'D', 'N', 'B', 4, 0, 0, 0, 5, 0, 0, 0};
+    bs_bs6_chunk ent = {"OBJD", bad, sizeof bad};
+    BS_CHECK_EQ_INT(bs_bs6_entity_logic(&ent, &arena, &g), BS_ERR_FORMAT);
+    bs_arena_free(&arena);
+}
+
+static void test_nodes(void)
+{
+    size_t n = synth_nodes(buf, sizeof buf);
+    BS_CHECK(n > 0);
+    bs_arena arena;
+    bs_arena_init(&arena, 0);
+    bs_nav_graph g;
+    BS_CHECK_EQ_INT(bs_nodes_parse(buf, n, &arena, &g), BS_OK);
+    BS_CHECK_EQ_INT(g.count, 3);
+    BS_CHECK(near(g.nodes[0].pos[0], 1) && near(g.nodes[0].pos[1], -2) && near(g.nodes[0].pos[2], 3));
+    BS_CHECK(near(g.nodes[2].pos[2], 23));
+    BS_CHECK_EQ_INT(g.nodes[0].group, 7);
+    BS_CHECK_EQ_INT(g.nodes[2].group, 9);
+    BS_CHECK_EQ_INT(g.nodes[0].unk_14, 123);
+    BS_CHECK_EQ_INT(g.nodes[0].link_count, 2);
+    BS_CHECK_EQ_INT(g.nodes[0].links[1].target, 2);
+    BS_CHECK_EQ_INT(g.nodes[0].links[1].distance, 20);
+    BS_CHECK_EQ_INT(g.nodes[1].link_count, 0);
+    BS_CHECK_EQ_INT(g.nodes[2].links[0].target, 0);
+
+    for (size_t len = 0; len < n; len++)
+        BS_CHECK(bs_nodes_parse(buf, len, &arena, &g) != BS_OK);
+    /* Trailing bytes. */
+    buf[n] = 0;
+    BS_CHECK_EQ_INT(bs_nodes_parse(buf, n + 1, &arena, &g), BS_ERR_FORMAT);
+    /* A link past the last node: node 2's link target is the file's last u16. */
+    buf[n - 2] = 3;
+    BS_CHECK_EQ_INT(bs_nodes_parse(buf, n, &arena, &g), BS_ERR_FORMAT);
+    buf[n - 2] = 0;
+    /* A record size that disagrees with its link count (node 0's size field). */
+    buf[4] = 0x25 + 4;
+    BS_CHECK_EQ_INT(bs_nodes_parse(buf, n, &arena, &g), BS_ERR_FORMAT);
+    bs_arena_free(&arena);
+}
+
 static void test_strmap(void)
 {
     bs_strmap m;
@@ -211,6 +290,8 @@ int main(void)
     BS_RUN(test_bs6_parse);
     BS_RUN(test_bs6_rejects);
     BS_RUN(test_rotation);
+    BS_RUN(test_bs6_logic);
+    BS_RUN(test_nodes);
     BS_RUN(test_strmap);
     return BS_TEST_RESULT();
 }

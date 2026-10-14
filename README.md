@@ -26,6 +26,22 @@ export BS_DATA_DIR=~/Games/Battlespire
 ctest --preset debug          # data tests are skipped when BS_DATA_DIR is unset
 ```
 
+## The game
+
+There is no gameplay yet. `openbattlespire` runs the start-up sequence: the
+intro video (any key skips it), the title menu with its music, and Single
+Player (or Enter), which puts you in the first level to fly around with its
+music and ambient sounds. You walk with the original's collision, speeds,
+gravity and jumping: W A S D (hold Space to charge a jump, release to jump;
+C ducks, Ctrl sneaks), and click (once the mouse is captured) or press E to
+use what's under the crosshair. `--keys original` uses the game's own layout
+(arrows, Alt to jump, S to sneak, Space with the mouse pulled back to duck).
+Doors, lifts and portals work. F toggles flying. Esc goes back to the title.
+
+```sh
+./build/debug/src/app/openbattlespire            # --no-intro, --level l3.bs6, --mute
+```
+
 ## Tools
 
 `bstool` inspects and converts the game data (`bstool help` lists every command):
@@ -45,4 +61,13 @@ bstool level -o out/ l1               # whole levels to glTF (opens in Blender)
 
 Click to capture the mouse, then WASD to move, Space/C up and down, Shift
 faster; PgUp/PgDn switch levels, F2 toggles classic/enhanced rendering and
-F12 saves a screenshot. `bsview --help` lists everything.
+F12 saves a screenshot. Each level plays its music and ambient sounds; M
+toggles sound and `--mute` turns it off. `bsview --help` lists everything.
+
+`bsplay` plays the videos, sounds and music:
+
+```sh
+./build/debug/src/tools/bsplay/bsplay video STORY     # a video from the CD, with sound
+./build/debug/src/tools/bsplay/bsplay sound 102       # a SPIRE.SND effect by id
+./build/debug/src/tools/bsplay/bsplay music 2         # MUSIC/Track02.ogg
+```

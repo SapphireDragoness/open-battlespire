@@ -3,6 +3,7 @@
  * These are the regression gate for format parsers against the shipped data.
  */
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,8 @@
 #include "bs/assets/scene.h"
 #include "bs/core/install.h"
 #include "bs/formats/bs6.h"
+#include "bs/game/level_logic.h"
+#include "bs/game/player.h"
 #include "bs/formats/bsa.h"
 #include "bs/formats/bsi.h"
 #include "bs/formats/flic.h"
@@ -18,7 +21,10 @@
 #include "bs/formats/le.h"
 #include "bs/formats/levels.h"
 #include "bs/formats/model.h"
+#include "bs/formats/nodes.h"
 #include "bs/formats/rsc.h"
+#include "bs/formats/smacker.h"
+#include "bs/formats/wav.h"
 #include "bs_test.h"
 
 static const char *data_dir;
@@ -109,6 +115,10 @@ static void test_levels_and_rsc(void)
     BS_CHECK_EQ_INT(levels.count, 17);
     if (levels.count == 17)
         BS_CHECK(strcmp(levels.levels[0].name, "The Weir Gate") == 0);
+    /* Campaign Lv1..Lv7 play tracks 2..7 and 9; every multiplayer level plays 5. */
+    static const int tracks[17] = {2, 3, 4, 5, 6, 7, 9, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5};
+    for (size_t i = 0; i < levels.count && i < 17; i++)
+        BS_CHECK_EQ_INT(bs_level_music_track(&levels.levels[i]), tracks[i]);
 
     bs_rsc rsc;
     BS_CHECK_EQ_INT(bs_vfs_read(&vfs, "GAMEDATA/TEXT.RSC", &a, &data, &n), BS_OK);
@@ -317,7 +327,7 @@ static void test_all_levels(void)
     BS_CHECK_EQ_INT(bs_assets_open(&vfs, &assets), BS_OK);
     bs_bsa *bsa;
     BS_CHECK_EQ_INT(bs_bsa_open_vfs(&vfs, "GAMEDATA/BS6.BSA", &bsa), BS_OK);
-    uint32_t levels = 0;
+    uint32_t levels = 0, props = 0, ctrls = 0, links = 0;
     for (uint32_t i = 0; i < bsa->count; i++) {
         if (!ends_with(bsa->records[i].name, ".BS6"))
             continue;
@@ -331,6 +341,31 @@ static void test_all_levels(void)
         bs_result r = bs_bs6_parse(data, n, &a, &lvl);
         if (r == BS_OK)
             r = bs_scene_build(assets, &lvl, &a, &scene);
+        for (uint32_t k = 0; r == BS_OK && k < lvl.object_count + lvl.flat_count + lvl.light_count; k++) {
+            const bs_bs6_chunk *ent = k < lvl.object_count ? &lvl.objects[k].chunk
+                                      : k < lvl.object_count + lvl.flat_count
+                                          ? &lvl.flats[k - lvl.object_count].chunk
+                                          : &lvl.lights[k - lvl.object_count - lvl.flat_count].chunk;
+            bs_bs6_logic g;
+            r = bs_bs6_entity_logic(ent, &a, &g);
+            props += g.prop_count;
+            ctrls += g.ctrl_count;
+            links += g.link_count;
+        }
+        if (r == BS_OK) {
+            /* The logic builds, and every level's triggers can be fired and run for a minute. */
+            bs_level_logic lg;
+            r = bs_level_logic_build(&lvl, &a, &lg);
+            for (uint32_t k = 0; r == BS_OK && k < lg.object_count; k++) {
+                bs_logic_output out;
+                bs_level_logic_activate(&lg, k, BS_LOGIC_EVENT_USE, 0, &out);
+                bs_level_logic_activate(&lg, k, BS_LOGIC_EVENT_STEP, 0, &out);
+            }
+            for (uint32_t t = 0; r == BS_OK && t <= 60000; t += 50) {
+                bs_logic_output out;
+                bs_level_logic_update(&lg, t, &out);
+            }
+        }
         if (r != BS_OK)
             fprintf(stderr, "  %s: %s\n", bsa->records[i].name, bs_result_str(r));
         BS_CHECK_EQ_INT(r, BS_OK);
@@ -338,6 +373,9 @@ static void test_all_levels(void)
         bs_arena_free(&a);
     }
     BS_CHECK_EQ_INT(levels, 45);
+    BS_CHECK_EQ_INT(props, 4194); /* as in docs/formats/bs6.md's survey */
+    BS_CHECK_EQ_INT(ctrls, 1590);
+    BS_CHECK_EQ_INT(links, 486);
 
     bs_arena a;
     bs_arena_init(&a, 0);
@@ -370,6 +408,242 @@ static void test_all_levels(void)
     bs_assets_close(assets);
 }
 
+/*
+ * Level 1 built with its interactive objects as separate, movable parts
+ * matches the all-static build: same triangles, and rays hit at the same
+ * distances.
+ */
+static void test_separate_objects(void)
+{
+    bs_assets *assets;
+    BS_CHECK_EQ_INT(bs_assets_open(&vfs, &assets), BS_OK);
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    uint8_t *data;
+    size_t n;
+    bs_bs6_level lvl;
+    BS_CHECK_EQ_INT(bs_assets_read(assets, "l1.bs6", &a, &data, &n), BS_OK);
+    BS_CHECK_EQ_INT(bs_bs6_parse(data, n, &a, &lvl), BS_OK);
+    bool *sep = BS_ARENA_ARRAY(&a, bool, lvl.object_count);
+    uint32_t nsep = 0;
+    for (uint32_t i = 0; i < lvl.object_count; i++) {
+        bs_bs6_logic g;
+        BS_CHECK_EQ_INT(bs_bs6_entity_logic(&lvl.objects[i].chunk, &a, &g), BS_OK);
+        sep[i] = g.ctrl_count || g.link_count;
+        nsep += sep[i];
+    }
+    bs_scene all, part;
+    BS_CHECK_EQ_INT(bs_scene_build(assets, &lvl, &a, &all), BS_OK);
+    BS_CHECK_EQ_INT(bs_scene_build_ex(assets, &lvl, sep, &a, &part), BS_OK);
+    BS_CHECK(nsep > 50);
+    BS_CHECK_EQ_INT(all.vertex_count, part.vertex_count);
+    BS_CHECK(part.batch_count > part.static_batch_count);
+    for (int c = 0; c < 3; c++)
+        BS_CHECK(fabsf(all.min[c] - part.min[c]) < 0.01f && fabsf(all.max[c] - part.max[c]) < 0.01f);
+    /* Rays from the start marker in 64 directions. */
+    float o[3] = {0, 0, 0};
+    for (uint32_t i = 0; i < lvl.flat_count; i++)
+        if (bs_strcasecmp(lvl.flats[i].name, "start") == 0)
+            for (int c = 0; c < 3; c++)
+                o[c] = (float)lvl.flats[i].pos[c];
+    uint32_t hits = 0, object_hits = 0;
+    for (int k = 0; k < 64; k++) {
+        float yaw = (float)k * 0.7f, pitch = (float)(k % 7 - 3) * 0.4f;
+        float d[3] = {sinf(yaw) * cosf(pitch), sinf(pitch), cosf(yaw) * cosf(pitch)};
+        int32_t ob1, ob2;
+        float t1 = bs_scene_raycast(&all, &lvl, NULL, o, d, 20000, &ob1);
+        float t2 = bs_scene_raycast(&part, &lvl, NULL, o, d, 20000, &ob2);
+        BS_CHECK(ob1 == -1);
+        BS_CHECK((t1 < 0) == (t2 < 0) && fabsf(t1 - t2) < 0.05f);
+        hits += t1 >= 0;
+        object_hits += ob2 >= 0;
+    }
+    BS_CHECK(hits > 32);
+    printf("  l1: %u separate objects, %u of 64 rays hit, %u on them\n", nsep, hits, object_hits);
+    bs_arena_free(&a);
+    bs_assets_close(assets);
+}
+
+/*
+ * A player dropped at level 1's start lands on the floor at height 0 (the
+ * memory dumps show the player standing at y = 0 there) and can walk about.
+ */
+static void test_player_level1(void)
+{
+    bs_assets *assets;
+    BS_CHECK_EQ_INT(bs_assets_open(&vfs, &assets), BS_OK);
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    uint8_t *data;
+    size_t n;
+    bs_bs6_level lvl;
+    BS_CHECK_EQ_INT(bs_assets_read(assets, "l1.bs6", &a, &data, &n), BS_OK);
+    BS_CHECK_EQ_INT(bs_bs6_parse(data, n, &a, &lvl), BS_OK);
+    bool *sep = BS_ARENA_ARRAY(&a, bool, lvl.object_count);
+    for (uint32_t i = 0; i < lvl.object_count; i++) {
+        bs_bs6_logic g;
+        BS_CHECK_EQ_INT(bs_bs6_entity_logic(&lvl.objects[i].chunk, &a, &g), BS_OK);
+        sep[i] = g.ctrl_count || g.link_count;
+    }
+    bs_scene scene;
+    bs_collision_world w;
+    BS_CHECK_EQ_INT(bs_scene_build_ex(assets, &lvl, sep, &a, &scene), BS_OK);
+    BS_CHECK_EQ_INT(bs_collision_build(&scene, &lvl, &a, &w), BS_OK);
+    float start[3] = {0, 0, 0};
+    for (uint32_t i = 0; i < lvl.flat_count; i++)
+        if (bs_strcasecmp(lvl.flats[i].name, "start") == 0)
+            for (int c = 0; c < 3; c++)
+                start[c] = (float)lvl.flats[i].pos[c];
+    bs_player p;
+    bs_player_init(&p, start, 0);
+    static const bs_player_stats stats = {50, 50, 0, false};
+    bs_player_input in = {0};
+    bs_player_events ev;
+    for (int i = 0; i < 100; i++)
+        bs_player_move(&p, &stats, &w, &in, 20, &ev);
+    printf("  l1 start flat at %.0f %.0f %.0f; player stands at %.1f\n", (double)start[0], (double)start[1],
+           (double)start[2], (double)p.pos[1]);
+    BS_CHECK(p.on_ground && fabsf(p.pos[1]) < 0.5f);
+    /* Walk from the start in eight directions for 3 s, then wait 4 s: every
+     * walk ends standing on something (two of them drop into the pit beside
+     * the start ramp, whose floor is at 1026), never falling out of the level. */
+    for (int d = 0; d < 8; d++) {
+        bs_player_init(&p, start, (float)d * 0.785398f);
+        in.forward = 1;
+        for (int i = 0; i < 150; i++)
+            bs_player_move(&p, &stats, &w, &in, 20, &ev);
+        in.forward = 0;
+        for (int i = 0; i < 200; i++)
+            bs_player_move(&p, &stats, &w, &in, 20, &ev);
+        BS_CHECK(p.on_ground && p.pos[1] < 1100);
+    }
+    bs_arena_free(&a);
+    bs_assets_close(assets);
+}
+
+/*
+ * Every NODES file named in LEVELS.TXT parses, links included. Three
+ * deathmatch levels have none; nodes.m1 serves both versions of Cf1.
+ */
+static void test_all_nodes(void)
+{
+    bs_assets *assets;
+    BS_CHECK_EQ_INT(bs_assets_open(&vfs, &assets), BS_OK);
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    uint8_t *data;
+    size_t n;
+    bs_level_table table;
+    BS_CHECK_EQ_INT(bs_vfs_read(&vfs, "GAMEDATA/LEVELS.TXT", &a, &data, &n), BS_OK);
+    BS_CHECK_EQ_INT(bs_levels_parse(data, n, &a, &table), BS_OK);
+    uint32_t files = 0, nodes = 0, links = 0;
+    for (size_t i = 0; i < table.count; i++) {
+        const char *name = table.levels[i].nodes;
+        bool seen = !name[0];
+        for (size_t k = 0; k < i && !seen; k++)
+            seen = strcmp(table.levels[k].nodes, name) == 0;
+        if (seen)
+            continue;
+        bs_nav_graph g;
+        BS_CHECK_EQ_INT(bs_assets_read(assets, name, &a, &data, &n), BS_OK);
+        bs_result r = bs_nodes_parse(data, n, &a, &g);
+        if (r != BS_OK)
+            fprintf(stderr, "  %s: %s\n", name, bs_result_str(r));
+        BS_CHECK_EQ_INT(r, BS_OK);
+        files++;
+        nodes += g.count;
+        for (uint32_t k = 0; k < g.count; k++)
+            links += g.nodes[k].link_count;
+    }
+    BS_CHECK_EQ_INT(files, 13);
+    BS_CHECK_EQ_INT(nodes, 16558);
+    printf("  %u nodes, %u links\n", nodes, links);
+    bs_arena_free(&a);
+    bs_assets_close(assets);
+}
+
+/*
+ * Every sound effect and voice clip is an 8-bit mono PCM WAV. Voices are all
+ * 11025 Hz; effects use 11025 Hz (280), 32000 Hz (89) or 8114 Hz (1).
+ */
+static void test_all_sounds(void)
+{
+    static const struct {
+        const char *archive;
+        uint32_t count, at_11025, at_32000, at_8114;
+    } archives[] = {{"GAMEDATA/SPIRE.SND", 370, 280, 89, 1}, {"WAVES.BSA", 775, 775, 0, 0}};
+    for (size_t k = 0; k < sizeof archives / sizeof archives[0]; k++) {
+        bs_bsa *bsa;
+        BS_CHECK_EQ_INT(bs_bsa_open_vfs(&vfs, archives[k].archive, &bsa), BS_OK);
+        if (!bsa)
+            continue;
+        uint32_t ok = 0, wavs = 0, r11 = 0, r32 = 0, r8 = 0;
+        bs_arena a;
+        bs_arena_init(&a, 0);
+        for (uint32_t i = 0; i < bsa->count; i++) {
+            const bs_bsa_record *rec = &bsa->records[i];
+            if (rec->name[0] && !ends_with(rec->name, ".WAV"))
+                continue;
+            wavs++;
+            uint8_t *data;
+            size_t n;
+            bs_wav w;
+            if (bs_bsa_read(bsa, rec, &a, &data, &n) == BS_OK && bs_wav_parse(data, n, &w) == BS_OK &&
+                w.bits == 8 && w.channels == 1 && w.frame_count > 0) {
+                ok++;
+                r11 += w.rate == 11025;
+                r32 += w.rate == 32000;
+                r8 += w.rate == 8114;
+            }
+            bs_arena_reset(&a);
+        }
+        BS_CHECK_EQ_INT(wavs, archives[k].count);
+        BS_CHECK_EQ_INT(ok, archives[k].count);
+        BS_CHECK_EQ_INT(r11, archives[k].at_11025);
+        BS_CHECK_EQ_INT(r32, archives[k].at_32000);
+        BS_CHECK_EQ_INT(r8, archives[k].at_8114);
+        bs_arena_free(&a);
+        bs_bsa_close(bsa);
+    }
+}
+
+/* Every video decodes completely, with a soundtrack as long as the video. */
+static void test_all_videos(void)
+{
+    static const struct {
+        const char *name;
+        uint32_t frames;
+    } videos[] = {{"STORY.SMK", 2371}, {"MALE.SMK", 1791}, {"FEMALE.SMK", 1791},
+                  {"ANCHORS.SMK", 101}, {"CHOP2.SMK", 80},   {"JUMP.SMK", 46}};
+    for (size_t k = 0; k < sizeof videos / sizeof videos[0]; k++) {
+        char path[64];
+        snprintf(path, sizeof path, "VIDEOS/%s", videos[k].name);
+        bs_arena a;
+        bs_arena_init(&a, 0);
+        uint8_t *data;
+        size_t n;
+        bs_smacker s;
+        BS_CHECK_EQ_INT(bs_vfs_read(&vfs, path, &a, &data, &n), BS_OK);
+        BS_CHECK_EQ_INT(bs_smk_open(data, n, &a, &s), BS_OK);
+        BS_CHECK_EQ_INT(s.frames, videos[k].frames);
+        uint64_t audio = 0;
+        bs_result r;
+        while ((r = bs_smk_next_frame(&s)) == BS_OK)
+            audio += s.audio_bytes[0];
+        BS_CHECK_EQ_INT(r, BS_ERR_NOT_FOUND);
+        BS_CHECK_EQ_INT(s.next, videos[k].frames);
+        if (s.tracks[0].present) {
+            double audio_ms = (double)audio / s.tracks[0].rate * 1000.0; /* all tracks are 8-bit mono */
+            double video_ms = s.frames * s.frame_ms;
+            BS_CHECK(audio_ms > video_ms - s.frame_ms && audio_ms < video_ms + s.frame_ms);
+        }
+        bs_smk_close(&s);
+        bs_arena_free(&a);
+    }
+    BS_CHECK_EQ_INT(bs_vfs_exists(&vfs, "MUSIC/Track02.ogg"), BS_OK);
+    BS_CHECK_EQ_INT(bs_vfs_exists(&vfs, "MUSIC/Track03.ogg"), BS_OK);
+}
+
 int main(void)
 {
     data_dir = getenv("BS_DATA_DIR");
@@ -393,6 +667,11 @@ int main(void)
     BS_RUN(test_fonts);
     BS_RUN(test_all_models);
     BS_RUN(test_all_levels);
+    BS_RUN(test_separate_objects);
+    BS_RUN(test_player_level1);
+    BS_RUN(test_all_nodes);
+    BS_RUN(test_all_sounds);
+    BS_RUN(test_all_videos);
     bs_cdimage_close(cd);
     return BS_TEST_RESULT();
 }

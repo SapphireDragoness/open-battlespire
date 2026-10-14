@@ -44,6 +44,8 @@ typedef struct bs_scene_batch {
     uint32_t material;
     uint32_t first;
     uint32_t count;
+    int32_t object;   /* -1: static, in level coordinates; else a separate object
+                         (level object index), in its model space (units / 256) */
 } bs_scene_batch;
 
 typedef struct bs_scene_sprite {
@@ -60,8 +62,10 @@ typedef struct bs_scene {
     uint32_t vertex_count;
     bs_scene_material *materials;
     uint32_t material_count;
-    bs_scene_batch *batches;     /* one per material, in material order */
+    bs_scene_batch *batches;     /* static: one per material, in material order; then the
+                                    separate objects' batches, grouped by object */
     uint32_t batch_count;
+    uint32_t static_batch_count;
     bs_scene_sprite *sprites;
     uint32_t sprite_count;
     float min[3], max[3];        /* bounds of the geometry */
@@ -69,6 +73,28 @@ typedef struct bs_scene {
 } bs_scene;
 
 bs_result bs_scene_build(bs_assets *assets, const bs_bs6_level *level, bs_arena *arena, bs_scene *out);
+
+/* As bs_scene_build, but objects with separate[i] set get their own batches
+ * in model space, so they can be moved (and picked) on their own. */
+bs_result bs_scene_build_ex(bs_assets *assets, const bs_bs6_level *level, const bool *separate, bs_arena *arena,
+                            bs_scene *out);
+
+/* An object placement as a transform: rotation (row-major 3x3) then translation. */
+typedef struct bs_scene_xform {
+    float rot[9];
+    float pos[3];
+} bs_scene_xform;
+
+bs_scene_xform bs_scene_object_xform(const int32_t angles[3], const float pos[3]);
+
+/*
+ * Casts a ray (origin, unit direction) against the scene's triangles up to
+ * max_dist, ignoring separate objects beyond the level's own. Separate objects are placed by xforms[object] (indexed by level
+ * object; NULL uses their level placement from `level`). Returns the hit
+ * distance, or a negative value; *object is the separate object hit or -1.
+ */
+float bs_scene_raycast(const bs_scene *s, const bs_bs6_level *level, const bs_scene_xform *xforms,
+                       const float origin[3], const float dir[3], float max_dist, int32_t *object);
 
 /* Transforms a model point by an object's placement into level units. */
 void bs_scene_transform(const float rot[9], const int32_t pos[3], const bs_model_point *p, float out[3]);

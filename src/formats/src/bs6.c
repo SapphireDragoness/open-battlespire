@@ -285,3 +285,82 @@ void bs_bs6_rotation(const int32_t angles[3], float m[9])
         m[6 + col] = (float)c;
     }
 }
+
+/* ---- entity logic ---- */
+
+/* IDNB plus RAWD (STRU, CTRL) or IDTY plus IDNB (LINK). */
+static bool parse_record(const bs_bs6_chunk *c, bs_bs6_record *out)
+{
+    bool have_id = false, have_raw = false;
+    bs_bs6_chunk f;
+    bs_bs6_iter it = bs_bs6_iter_make(c->data, c->size);
+    while (bs_bs6_next(&it, &f)) {
+        if (is(&f, "IDNB"))
+            have_id = get_u32(&f, &out->id);
+        else if (is(&f, "RAWD")) {
+            out->data = f.data;
+            out->size = f.size;
+            have_raw = true;
+        }
+    }
+    return !it.err && have_id && have_raw;
+}
+
+static bool parse_link(const bs_bs6_chunk *c, bs_bs6_link *out)
+{
+    bool have_type = false, have_target = false;
+    bs_bs6_chunk f;
+    bs_bs6_iter it = bs_bs6_iter_make(c->data, c->size);
+    while (bs_bs6_next(&it, &f)) {
+        if (is(&f, "IDTY"))
+            have_type = get_u32(&f, &out->type);
+        else if (is(&f, "IDNB"))
+            have_target = get_u32(&f, &out->target);
+    }
+    return !it.err && have_type && have_target;
+}
+
+bs_result bs_bs6_entity_logic(const bs_bs6_chunk *entity, bs_arena *arena, bs_bs6_logic *out)
+{
+    memset(out, 0, sizeof *out);
+    bool err = false;
+    uint32_t np = count_children(entity, "STRU", &err), nc = count_children(entity, "CTRL", &err),
+             nl = count_children(entity, "LINK", &err);
+    if (err)
+        return BS_ERR_FORMAT;
+    out->props = BS_ARENA_ARRAY(arena, bs_bs6_record, np ? np : 1);
+    out->ctrls = BS_ARENA_ARRAY(arena, bs_bs6_record, nc ? nc : 1);
+    out->links = BS_ARENA_ARRAY(arena, bs_bs6_link, nl ? nl : 1);
+    if (!out->props || !out->ctrls || !out->links)
+        return BS_ERR_NOMEM;
+    bs_bs6_chunk c;
+    bs_bs6_iter it = bs_bs6_iter_make(entity->data, entity->size);
+    while (bs_bs6_next(&it, &c)) {
+        bool ok = true;
+        if (is(&c, "STRU"))
+            ok = parse_record(&c, &out->props[out->prop_count++]);
+        else if (is(&c, "CTRL"))
+            ok = parse_record(&c, &out->ctrls[out->ctrl_count++]);
+        else if (is(&c, "LINK"))
+            ok = parse_link(&c, &out->links[out->link_count++]);
+        if (!ok)
+            return BS_ERR_FORMAT;
+    }
+    return it.err ? BS_ERR_FORMAT : BS_OK;
+}
+
+int32_t bs_bs6_record_i32(const bs_bs6_record *r, uint32_t i)
+{
+    if (!r || (uint64_t)i * 4 + 4 > r->size)
+        return 0;
+    const uint8_t *p = r->data + (size_t)i * 4;
+    return (int32_t)((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24);
+}
+
+const bs_bs6_record *bs_bs6_logic_prop(const bs_bs6_logic *l, uint32_t id)
+{
+    for (uint32_t i = 0; i < l->prop_count; i++)
+        if (l->props[i].id == id)
+            return &l->props[i];
+    return NULL;
+}
