@@ -102,6 +102,46 @@ static void test_fall(void)
     BS_CHECK(fabsf(eye[1] + 72) < 0.01f);
 }
 
+/* Slow Fall: from 1000 up the fall stays at 60 units/s (0x3C00), taking about 16 s. */
+static void test_slow_fall(void)
+{
+    setup();
+    bs_player p;
+    bs_player_init(&p, (const float[3]){0, -1000, 0}, 0);
+    bs_player_input in = {.slow_fall = true};
+    bs_player_events ev;
+    int frames = 0;
+    do {
+        bs_player_move(&p, &stats, &world, &in, 20, &ev);
+        BS_CHECK(p.vy <= 0x3C00);
+        frames++;
+    } while (!ev.landed && frames < 2000);
+    BS_CHECK(ev.landed && frames * 20 > 15000 && frames * 20 < 17000);
+}
+
+/* The Jumping effect: a charged jump goes 330/256 as far. */
+static void test_jumping_effect(void)
+{
+    float dist[2];
+    for (int k = 0; k < 2; k++) {
+        setup();
+        bs_player p;
+        bs_player_init(&p, (const float[3]){-1000, 0, 1000}, 0);
+        bs_player_input in = {.jump = true, .jumping = k == 1};
+        bs_player_events ev;
+        run(&p, &in, 1, &ev);
+        run(&p, &in, 50, &ev); /* charge for a second */
+        in.jump = false;
+        int frames = 0;
+        do {
+            bs_player_move(&p, &stats, &world, &in, 20, &ev);
+            frames++;
+        } while (!ev.landed && frames < 500);
+        dist[k] = p.pos[2] - 1000;
+    }
+    BS_CHECK(dist[0] > 10 && fabsf(dist[1] / dist[0] - 330.0f / 256.0f) < 0.06f);
+}
+
 /* Speed 50 walks 213 units a second (128 + 50 * 435 / 256). */
 static void test_walk_speed(void)
 {
@@ -257,6 +297,8 @@ int main(void)
 {
     bs_arena_init(&arena, 0);
     BS_RUN(test_fall);
+    BS_RUN(test_slow_fall);
+    BS_RUN(test_jumping_effect);
     BS_RUN(test_walk_speed);
     BS_RUN(test_wall);
     BS_RUN(test_steps);

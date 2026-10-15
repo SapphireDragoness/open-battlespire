@@ -23,6 +23,8 @@ typedef struct bs_level_view {
     bs_scene scene;
     bs_level_renderer *renderer;
     uint32_t jump_pointer;      /* renderer object of the jump pointer (jumper.3d), or UINT32_MAX */
+    uint32_t extra_first;       /* renderer object of the first extra model (bs_level_view_load_ex), or UINT32_MAX */
+    uint32_t extra_count;
     bool loaded;
 } bs_level_view;
 
@@ -34,6 +36,14 @@ typedef struct bs_level_view {
  */
 bs_result bs_level_view_load(bs_level_view *v, bs_assets *assets, const bs_vfs *vfs, const char *file,
                              const bs_level_info *info, float fog_scale, bs_render_settings *settings);
+/*
+ * As bs_level_view_load, and makes extra_models (e.g. "dagger.3d") hidden
+ * separate objects extra_first .. extra_first + extra_count - 1, to draw
+ * with bs_level_renderer_draw_object or as instances.
+ */
+bs_result bs_level_view_load_ex(bs_level_view *v, bs_assets *assets, const bs_vfs *vfs, const char *file,
+                                const bs_level_info *info, float fog_scale, bs_render_settings *settings,
+                                const char *const *extra_models, uint32_t extra_count);
 void bs_level_view_unload(bs_level_view *v);
 
 /* Puts the camera at viewpoint `view`, or with view < 0 (or out of range) at the

@@ -140,4 +140,53 @@ size_t synth_nodes(uint8_t *out, size_t cap);
  */
 size_t synth_bs6_logic(uint8_t *out, size_t cap);
 
+/*
+ * Item tables as GAME.EXE lays them out, after 100 bytes of padding:
+ *   16 weapon records (24 bytes): i32 {i, 1 + (i >= 4), 0, i + 1, i + 6, skill}
+ *     with skill 14 for record 0 and 16 for record 15 (15 + i % 5 otherwise)
+ *   43 base records (0x2F2 bytes): name ("Dagger", "Short Sword", "Broad Sword"
+ *     at 3, "Potion" 15, "Sack" 16, "Clothes" 19, "Arrow" 22, "Helmet" 24,
+ *     "Sigil Amulet" 31, "Book" 32, else "Item N"), u16 index at 0x20, icon
+ *     at 0x22 ("mwpns6NN" for weapons, "x" Clothes, "hlmt" 24, "brst" 25), condition 100 + i at 0x2B and 0x2F, image 7 at 0x33,
+ *     weight i + 1 at 0x35, container bit at 0x42 for 16-18 and 42
+ *   then "\0Iron\0Steel\0Silver\0Elven\0Dwarven\0Mithril\0Adamantium\0Ebony\0Orcish\0Daedric\0"
+ */
+size_t synth_item_exe(uint8_t *out, size_t cap);
+
+/*
+ * BS6 level with items (model "box"):
+ *   #30 at x 0:   STRU 105 [22, 0, 1, 10000] (arrows)
+ *   #31 at x 100: STRU 116 [10000, 19, 0, 0], STRU 121 [362, 1], STRU 116 [7001, 3, 0, 1] (a chest)
+ *   #32 at x 200: CTRL 16 (no items)
+ *   #33 at x 300: STRU 115 [21] (a potion)
+ *   #34 at x 400: STRU 107 [993] (a book)
+ */
+size_t synth_bs6_items(uint8_t *out, size_t cap);
+
+/*
+ * Creature tables as GAME.EXE lays them out, after 100 bytes of padding
+ * (docs/formats/creatures.md):
+ *   16 records of 0xCE: names "Scamp", "Vermai", then "Creature N"; attributes
+ *     20 + i, 40, 10, 60, 20, 10, 65, 30; spell points 0; health 30 + 10 i;
+ *     skill 20; flags 0x18000 for 13; level 1; armour 2; a spell list at 0x74
+ *     for 2; mass 20 at 0x7C; weapon {0, 0, 0, 1, 6, 16} at 0x7E
+ *   16 image records of 0x31F: "CCCw0V.bsi" (V 0..4) in 0..4, "a" 5..9,
+ *     "s" 40..44, "d00" 45; CCC "smp", "ver", then "cNN"
+ *   at +0x4B48 from the table: level row l = {l, l + 1, l + 2, l + 3} mod 16
+ *   at +0xBD06: sounds 400 + 4 i + kind
+ */
+size_t synth_creature_exe(uint8_t *out, size_t cap);
+
+/*
+ * BS6 level with monster spawn points (flats; up is -y, the floor at 0):
+ *   #40 "monster1" at (0,-10,0): STRU 106 [3, 0, 0, 0, 77, 0, 0, 0x8000] (a Dremora, health 77)
+ *   #41 "monster1" at (300,-10,0): nothing (a random creature, by the percentage)
+ *   #42 "monster2" at (600,-10,0): STRU 108 "ab1" (a dialogue code: always)
+ *   #43 "monster1" at (900,-10,0): STRU 116 [10000, 19, 0, 0] (loot: always)
+ *   #44 "monster1" at (1200,-10,0): STRU 106 [0] (invalid: none)
+ *   #45 "start" at (0,-10,500)
+ *   #46 "MONSTER1" at (1500,-10,0): STRU 106 [12, 0, 0, 0, 0, 0, 13], STRU 108 "DS5" (waits to talk)
+ */
+size_t synth_bs6_monsters(uint8_t *out, size_t cap);
+
 #endif

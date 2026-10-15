@@ -30,12 +30,12 @@ int cmd_levels(int argc, char **argv)
     }
 
     printf("%-4s %-10s %-4s %-10s %-4s %-9s %5s %6s %5s %5s %4s  %s\n",
-           "id", "file", "mode", "sky", "haze", "nodes", "view", "ambient", "unk_c", "grid", "monsters%", "name");
+           "id", "file", "mode", "sky", "haze", "nodes", "view", "ambient", "active", "grid", "monsters%", "name");
     for (size_t i = 0; i < table.count; i++) {
         const bs_level_info *l = &table.levels[i];
         printf("%-4s %-10s %-4s %-10s %-4s %-9s %5" PRId32 " %6" PRId32 " %5" PRId32 " %5" PRId32 " %4" PRId32 "  %s\n",
                l->id, l->file, l->mode, l->sky[0] ? l->sky : "-", l->haze,
-               l->nodes[0] ? l->nodes : "-", l->view_distance, l->ambient, l->unk_c, l->grid_cell, l->monster_percent, l->name);
+               l->nodes[0] ? l->nodes : "-", l->view_distance, l->ambient, l->active_distance, l->grid_cell, l->monster_percent, l->name);
     }
     status = 0;
 done:

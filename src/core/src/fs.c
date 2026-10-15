@@ -25,6 +25,18 @@ int bs_strcasecmp(const char *a, const char *b)
     }
 }
 
+int bs_strncasecmp(const char *a, const char *b, size_t n)
+{
+    for (size_t i = 0; i < n; i++, a++, b++) {
+        int ca = (unsigned char)*a, cb = (unsigned char)*b;
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb || ca == 0)
+            return ca - cb;
+    }
+    return 0;
+}
+
 bool bs_path_join(char *out, size_t cap, const char *a, const char *b)
 {
     size_t la = strlen(a);

@@ -14,6 +14,7 @@ static const float body[3][2] = {{34, 7}, {41, 11}, {65, 16}};
 #define FLOOR_SNAP 25.0f        /* a floor nearer than this below the feet is stood on (0x2C723) */
 #define GRAVITY 0x18800         /* 1/256 units/s, per second (0x3FA97) */
 #define FALL_MAX 0x3E800
+#define SLOW_FALL_MAX 0x3C00    /* 60 units/s with Slow Fall */
 #define MAX_HITS 32
 #define GROUND_RADIUS 16.0f     /* the ground probe at the feet (0xED6C0) */
 #define CHARGE_STANDING 2000    /* the longest jump charge (0x40914) */
@@ -121,6 +122,8 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
     if (in->run)
         base += base * 282 / 256;
     float fwd_speed = (float)(base + 128), back_speed = (float)(base + 200) / 2, side_speed = (float)(base + 100);
+    if (in->walk_speed > 0)
+        fwd_speed = in->walk_speed;
     if (in->sneak) {
         /* Sneak Mode: the game halves the speeds for player flag +0x226 bit 0x40 */
         fwd_speed *= 0.5f;
@@ -129,11 +132,13 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
     }
 
     /* Jumps (0x40860, 0x40DF9): hold to charge, release to jump. */
-    int32_t j = (s->speed + s->attr_20) / 2 + 120;
+    int32_t j = (s->speed + s->strength) / 2 + 120;
     j += j / 2 * s->jump_skill / 100;
     if (in->run)
         j += j / 2;
     int32_t js = s->speed + 300 + 2 * s->jump_skill;
+    if (in->jumping)
+        js = js * 330 / 256; /* 0x408C5 */
     if (in->run)
         js = js * 310 / 256;
     uint32_t charge_max = p->moved ? CHARGE_MOVING : CHARGE_STANDING;
@@ -200,6 +205,8 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
         p->vy += (int32_t)((int64_t)GRAVITY * dt_ms / 1000);
         if (p->vy > FALL_MAX)
             p->vy = FALL_MAX;
+        if (in->slow_fall && p->vy > SLOW_FALL_MAX)
+            p->vy = SLOW_FALL_MAX; /* 0x3FBC2 */
         /* The game truncates each frame's move to whole units, which at high
          * frame rates would slow falls and jumps; here the fraction is kept. */
         dy = (float)p->vy * dt / 256.0f;

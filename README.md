@@ -28,7 +28,7 @@ ctest --preset debug          # data tests are skipped when BS_DATA_DIR is unset
 
 ## The game
 
-There is no gameplay yet. `openbattlespire` runs the start-up sequence: the
+`openbattlespire` runs the start-up sequence: the
 intro video (any key skips it), the title menu with its music, and Single
 Player (or Enter), which puts you in the first level to fly around with its
 music and ambient sounds. You walk with the original's collision, speeds,
@@ -36,10 +36,34 @@ gravity and jumping: W A S D (hold Space to charge a jump, release to jump;
 C ducks, Ctrl sneaks), and click (once the mouse is captured) or press E to
 use what's under the crosshair. `--keys original` uses the game's own layout
 (arrows, Alt to jump, S to sneak, Space with the mouse pulled back to duck).
-Doors, lifts and portals work. F toggles flying. Esc goes back to the title.
+Doors, lifts and portals work. Using an item, chest or sack opens the
+inventory screen with it (F10 or I opens it with what lies around): drag items
+between your inventory and the other list, double-click containers to open
+them, drop weapons, armour and clothes on your character to equip them and
+drag them off again, double-click books to read them and potions to drink
+them (`--name`, `--female` and `--race br` choose the character).
+Plaques show their text. Cogs, rods and keys open what they should;
+sigils bar the way unless you carry the right Sigil Amulet; gems restore
+health and spell points. Doors lead into level 5's houses and back, and each
+level's exit takes you on to the next. Monsters hunt you: hold the right mouse
+button and move the mouse to swing (pull down to chop, push up to thrust,
+sideways to slash); the weapon you wield is in your hand, and bare hands
+punch. Some wait to talk and greet you; they fight back if
+attacked. Dead monsters drop their loot. If you die, the captivity ending
+plays. F12 opens the spell book across the bottom of the screen: pick a
+spell, click its icon, delivery, element and detonation to change them, and
+press F1-F8 to give it a hot key; Cast or the hot key casts it. A touch spell
+goes on the next monster you use, a ranged one flies with the right button.
+Potions cast their spells, and monsters with spells cast theirs at you. Until
+there is character creation you know no spells: learn them from scrolls, or
+start with `--spells all` (or a list such as `--spells 18,21`). The bar at
+the bottom shows your face, health (blue) and spell points (yellow) and the
+compass; with the mouse free, its book and chest buttons open the spell book
+and the inventory. Tab hides it for the full view. F toggles flying, G
+classic/enhanced rendering. Esc goes back to the title.
 
 ```sh
-./build/debug/src/app/openbattlespire            # --no-intro, --level l3.bs6, --mute
+./build/debug/src/app/openbattlespire            # --no-intro, --level l3.bs6, --mute, --no-monsters, --spells all
 ```
 
 ## Tools

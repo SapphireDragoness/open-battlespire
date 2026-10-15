@@ -2,7 +2,7 @@
 # Runs one libFuzzer harness.
 #
 #   fuzz/run.sh <target> [seconds] [extra libFuzzer args...]
-#   targets: lzss bsa bsi flic font rsc levels cdimage le model bs6 wav smk nodes
+#   targets: lzss bsa bsi flic font rsc levels cdimage le model bs6 wav smk nodes magic book
 #
 # Build first:  cmake --preset fuzz && cmake --build --preset fuzz
 #
@@ -32,6 +32,8 @@ if [ -n "${BS_DATA_DIR:-}" ] && [ ! -d "$real" ]; then
     case $target in
         rsc)    cp "$BS_DATA_DIR/GAMEDATA/TEXT.RSC" "$real/" ;;
         levels) cp "$BS_DATA_DIR/GAMEDATA/LEVELS.TXT" "$real/" ;;
+        magic)  "$bstool" extract GAMEDATA/TXT.BSA -o "$real" MG0_GEN.TXT MG2_SPC.TXT >/dev/null ;;
+        book)   "$bstool" extract GAMEDATA/TXT.BSA -o "$real" BK1_993.TXT BK2_002.TXT BK6_048.TXT >/dev/null ;;
         le)     cp "$BS_DATA_DIR/GAME.EXE" "$real/" ;;
         bsi)
             # A few small real images of each encoding.

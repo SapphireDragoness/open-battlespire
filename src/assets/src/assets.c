@@ -15,6 +15,7 @@ typedef enum archive_id {
     ARCHIVE_3D,
     ARCHIVE_BSI,
     ARCHIVE_BS6,
+    ARCHIVE_TXT,
     ARCHIVE_COUNT
 } archive_id;
 
@@ -25,6 +26,7 @@ static const struct {
     {"3d", "GAMEDATA/3D.BSA"},
     {"bsi", "GAMEDATA/BSI.BSA"},
     {"bs6", "GAMEDATA/BS6.BSA"},
+    {"txt", "GAMEDATA/TXT.BSA"},
 };
 
 struct bs_assets {

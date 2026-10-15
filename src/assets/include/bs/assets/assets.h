@@ -30,7 +30,8 @@ typedef struct bs_assets bs_assets;
 bs_result bs_assets_open(const bs_vfs *vfs, bs_assets **out);
 void bs_assets_close(bs_assets *a);
 
-/* Reads a file by name, e.g. "l1.bs6" or "WALL96.BSI". */
+/* Reads a file by name, e.g. "l1.bs6", "WALL96.BSI" or "MG0_GEN.TXT": loose in GAMEDATA/, else from the
+ * archive for its extension (3D.BSA, BSI.BSA, BS6.BSA, TXT.BSA). */
 bs_result bs_assets_read(bs_assets *a, const char *name, bs_arena *arena, uint8_t **out, size_t *out_size);
 
 /* A model by name, with or without ".3d". */

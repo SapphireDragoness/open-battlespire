@@ -88,6 +88,7 @@ bs_result bs_collision_build(const bs_scene *scene, const bs_bs6_level *level, b
             bs_collision_tri *t = &out->tris[out->tri_count];
             if (!make_tri(&scene->vertices[v], t))
                 continue;
+            t->material = bt->material;
             for (int k = 0; k < 3; k++) {
                 x0 = fminf(x0, t->v[k][0]);
                 x1 = fmaxf(x1, t->v[k][0]);
@@ -114,6 +115,7 @@ bs_result bs_collision_build(const bs_scene *scene, const bs_bs6_level *level, b
             bs_collision_tri *t = &out->tris[out->tri_count];
             if (!make_tri(&scene->vertices[v], t))
                 continue;
+            t->material = bt->material;
             for (int k = 0; k < 3; k++)
                 o->radius = fmaxf(o->radius, sqrtf(dot(t->v[k], t->v[k])));
             out->tri_count++;
@@ -169,6 +171,12 @@ void bs_collision_place(bs_collision_world *w, uint32_t object, const float pos[
 {
     if (object < w->object_count && w->objects[object].present)
         w->objects[object].xform = bs_scene_object_xform(angles, pos);
+}
+
+void bs_collision_remove(bs_collision_world *w, uint32_t object)
+{
+    if (object < w->object_count)
+        w->objects[object].present = false;
 }
 
 /* ---- queries ---- */
@@ -349,7 +357,15 @@ static bool seg_tri(const bs_collision_tri *tr, const float o[3], const float d[
 bool bs_collision_segment(const bs_collision_world *w, const float from[3], const float to[3], float *t,
                           int32_t *object)
 {
+    uint32_t material;
+    return bs_collision_segment_material(w, from, to, t, object, &material);
+}
+
+bool bs_collision_segment_material(const bs_collision_world *w, const float from[3], const float to[3], float *t,
+                                   int32_t *object, uint32_t *material)
+{
     float d[3];
+    uint32_t best_mat = UINT32_MAX;
     sub(to, from, d);
     float best = 2;
     int32_t best_obj = -1;
@@ -368,6 +384,7 @@ bool bs_collision_segment(const bs_collision_world *w, const float from[3], cons
                 if (seg_tri(tr, from, d, &tt) && tt < best) {
                     best = tt;
                     best_obj = -1;
+                    best_mat = tr->material;
                 }
             }
         }
@@ -389,6 +406,7 @@ bool bs_collision_segment(const bs_collision_world *w, const float from[3], cons
             if (seg_tri(&w->tris[k], lf, ld, &tt) && tt < best) {
                 best = tt;
                 best_obj = (int32_t)o;
+                best_mat = w->tris[k].material;
             }
         }
     }
@@ -396,5 +414,6 @@ bool bs_collision_segment(const bs_collision_world *w, const float from[3], cons
         return false;
     *t = best;
     *object = best_obj;
+    *material = best_mat;
     return true;
 }

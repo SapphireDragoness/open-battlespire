@@ -32,7 +32,7 @@ typedef struct bs_level_info {
     int32_t ambient;  /* 1024..31000: ambient light in 1/512 shade levels; the renderer clamps it
                          to 16128 (31.5 levels: fully lit). RE: 0x6F20D, 0x8D013 */
     char nodes[16];   /* AI node file, e.g. "nodes.l1"; "" if none */
-    int32_t unk_c;    /* 1000..2500 */
+    int32_t active_distance; /* 1000..2500: monsters this near the player act (RE: 0x16C1A8, 0x451D3) */
     int32_t grid_cell; /* 2048..6000: spatial grid cell size; 64 x 64 cells centred on 0 (RE: 0x25B21) */
     int32_t monster_percent; /* 55..100: share of monster spawn points that get a monster (RE: 0x462CB) */
     char name[64];    /* display name */

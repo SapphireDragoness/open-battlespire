@@ -74,6 +74,13 @@ int main(int argc, char **argv)
         "l1.bs6\t\tLv1\t\t1336\tNNF\txxxx\t\t555\t1024\tnodes.l1\t1500\t4096\t80\tThe Weir Gate\r\n"
         "dmkk.bs6\tCf1\t\t2000\tCNC\tsky1.bsi\t444\t31000\txxxx\t\t2000\t3072\t100\tCastle flag capture\r\n";
     err |= write_seed(root, "levels", "two", levels, sizeof levels - 1);
+    static const char magic[] = "Name\t\"of the Test\"\r\nID#\t7001\r\nItem\t2\r\nSpell\t-1, 28, -1, 8, 4\r\n"
+                                "App\t15, 30, 100\r\nAdv\t36, 37\r\nUses\t10\r\nLevel\t0\r\n\r\n";
+    err |= write_seed(root, "magic", "one", magic, sizeof magic - 1);
+    n = synth_item_exe(buf, sizeof buf);
+    err |= write_seed(root, "magic", "tables", buf, n);
+    static const char book[] = "[[Heading]]\r\n\r\nHello %PCF, I am %APF.^Next$line\r\nmore text here";
+    err |= write_seed(root, "book", "small", book, sizeof book - 1);
 
     static const uint8_t lz[] = { 0xFF, 'v', '2', '.', '7', 0, 0, 0, 0, 0x01, 'x', 0xEE, 0xFF, 0x00, 0x00, 0x02 };
     err |= write_seed(root, "lzss", "mixed", lz, sizeof lz);

@@ -83,7 +83,7 @@ static bs_result parse_line(const char *line, size_t len, bs_level_info *out)
               copy_field(f[5], out->haze, sizeof out->haze) &&
               parse_int(f[6], &out->ambient) &&
               copy_optional(f[7], out->nodes, sizeof out->nodes) &&
-              parse_int(f[8], &out->unk_c) &&
+              parse_int(f[8], &out->active_distance) &&
               parse_int(f[9], &out->grid_cell) &&
               parse_int(f[10], &out->monster_percent) &&
               copy_field(name, out->name, sizeof out->name);

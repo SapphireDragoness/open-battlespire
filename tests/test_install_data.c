@@ -12,10 +12,16 @@
 #include "bs/assets/scene.h"
 #include "bs/core/install.h"
 #include "bs/formats/bs6.h"
+#include "bs/formats/items.h"
+#include "bs/game/items.h"
 #include "bs/game/level_logic.h"
 #include "bs/game/player.h"
 #include "bs/formats/bsa.h"
+#include "bs/formats/creatures.h"
+#include "bs/game/monsters.h"
+#include "bs/formats/spells.h"
 #include "bs/formats/bsi.h"
+#include "bs/formats/exe_text.h"
 #include "bs/formats/flic.h"
 #include "bs/formats/font.h"
 #include "bs/formats/le.h"
@@ -150,6 +156,14 @@ static void test_game_exe(void)
     BS_CHECK_EQ_INT(img.stats.offset32 + img.stats.selector, 32001);
     if (inst.version == BS_VERSION_PATCHED)
         BS_CHECK_EQ_INT(img.entry_va, 0x701b0);
+    /* The built-in messages. */
+    bs_exe_text text;
+    BS_CHECK_EQ_INT(bs_exe_text_read(&img, &a, &text), BS_OK);
+    BS_CHECK_EQ_INT(text.count, 543);
+    BS_CHECK(strcmp(bs_exe_message(&text, BS_MSG_CANNOT_CARRY), "You cannot carry any more stuff.") == 0);
+    BS_CHECK(strcmp(bs_exe_message(&text, BS_MSG_ATTRIBUTES), "strength") == 0);
+    BS_CHECK(strcmp(bs_exe_message(&text, BS_MSG_ATTRIBUTES + 7), "luck") == 0);
+    BS_CHECK(strcmp(bs_exe_message(&text, 543), "") == 0);
     bs_arena_free(&a);
 }
 
@@ -563,6 +577,260 @@ static void test_all_nodes(void)
 }
 
 /*
+ * The creature tables in GAME.EXE (docs/formats/creatures.md): every creature's
+ * images are there, and every campaign level's spawn points make valid monsters.
+ */
+static void test_creatures(void)
+{
+    bs_assets *assets;
+    BS_CHECK_EQ_INT(bs_assets_open(&vfs, &assets), BS_OK);
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    uint8_t *data;
+    size_t n;
+    static bs_creature_tables t;
+    BS_CHECK_EQ_INT(bs_vfs_read(&vfs, "GAME.EXE", &a, &data, &n), BS_OK);
+    BS_CHECK_EQ_INT(bs_creature_tables_read(data, n, &t), BS_OK);
+    BS_CHECK(strcmp(t.creatures[0].name, "Scamp") == 0);
+    BS_CHECK(strcmp(t.creatures[15].name, "Daedra Lord") == 0);
+    BS_CHECK_EQ_INT(t.creatures[0].health, 30);
+    BS_CHECK_EQ_INT(t.creatures[0].attributes[6], 65);
+    BS_CHECK_EQ_INT(t.creatures[4].weapon.damage_min, 12); /* Skeleton 12-18 */
+    BS_CHECK_EQ_INT(t.creatures[4].weapon.damage_max, 18);
+    BS_CHECK_EQ_INT(t.creatures[4].armour, 8);
+    BS_CHECK_EQ_INT(t.creatures[0].unk_7c, 20);
+    BS_CHECK_EQ_INT(t.creatures[5].unk_7c, 0); /* Ghosts aren't pushed */
+    BS_CHECK_EQ_INT(t.level_creatures[1][1], 1);
+    BS_CHECK_EQ_INT(t.level_creatures[8][3], 15);
+    BS_CHECK_EQ_INT(t.sounds[0][0], 445);
+    BS_CHECK_EQ_INT(t.sounds[15][3], 504);
+    /* The casters' spells: Dremora Cause Damage, Spider Daedra Poison, Daedra Lord Continuous Damage and
+     * Vampiric Drain or Cure Health and the three pools; the elements' tolerances. */
+    BS_CHECK(t.creatures[2].spells[0][0] == 18 && t.creatures[2].spells[0][1] == 0 && !t.creatures[2].spells[1][0]);
+    BS_CHECK(t.creatures[3].spells[0][0] == 10 && !t.creatures[0].spell_caster && t.creatures[13].spells[1][0] == 1);
+    BS_CHECK(t.creatures[15].spells[0][0] == 9 && t.creatures[15].spells[0][1] == 12);
+    BS_CHECK(t.creatures[15].spells[1][0] == 21 && t.creatures[15].spells[1][3] == 17 && !t.creatures[15].spells[1][4]);
+    BS_CHECK(t.creatures[8].immune == bs_element_bit(BS_ELEMENT_FIRE));
+    BS_CHECK(t.creatures[8].critical_weakness == bs_element_bit(BS_ELEMENT_COLD));
+    BS_CHECK(t.creatures[3].immune == bs_element_bit(BS_ELEMENT_POISON) && t.creatures[15].resists == 0x1F);
+    uint32_t images = 0;
+    for (int c = 0; c < BS_CREATURE_COUNT; c++)
+        for (int s = 0; s < BS_CREATURE_IMAGES; s++) {
+            if (!t.creatures[c].images[s][0])
+                continue;
+            const bs_bsi_image *img = bs_assets_image(assets, t.creatures[c].images[s]);
+            if (!img)
+                fprintf(stderr, "  no %s\n", t.creatures[c].images[s]);
+            BS_CHECK(img && img->frames >= 1 && img->bhdr[8] > 0);
+            images++;
+        }
+    BS_CHECK_EQ_INT(images, 16 * 16);
+    /* Every campaign level spawns. */
+    BS_CHECK_EQ_INT(bs_vfs_read(&vfs, "GAMEDATA/LEVELS.TXT", &a, &data, &n), BS_OK);
+    bs_level_table table;
+    BS_CHECK_EQ_INT(bs_levels_parse(data, n, &a, &table), BS_OK);
+    uint32_t total = 0;
+    for (size_t i = 0; i < table.count; i++) {
+        const bs_level_info *info = &table.levels[i];
+        if (bs_level_game_type(info) != BS_GAME_CAMPAIGN)
+            continue;
+        bs_bs6_level lv;
+        BS_CHECK_EQ_INT(bs_assets_read(assets, info->file, &a, &data, &n), BS_OK);
+        BS_CHECK_EQ_INT(bs_bs6_parse(data, n, &a, &lv), BS_OK);
+        bs_monsters ms;
+        memset(&ms, 0, sizeof ms);
+        BS_CHECK_EQ_INT(bs_monsters_find_points(&ms, &lv), BS_OK);
+        bs_rng r = {(uint32_t)i + 1};
+        BS_CHECK_EQ_INT(bs_monsters_spawn(&ms, &t, NULL, bs_level_number(info), 100, &r), BS_OK);
+        BS_CHECK(ms.point_count > 40 && ms.count > 40 && ms.count <= ms.point_count);
+        for (uint32_t k = 0; k < ms.count; k++)
+            BS_CHECK(ms.list[k].type < BS_CREATURE_COUNT && ms.list[k].health > 0);
+        printf("  %s: %u spawn points, %u monsters\n", info->file, ms.point_count, ms.count);
+        total += ms.count;
+        bs_monsters_free(&ms);
+    }
+    BS_CHECK(total > 400);
+    bs_arena_free(&a);
+    bs_assets_close(assets);
+}
+
+/*
+ * The item tables in GAME.EXE, both enchantment lists, and every level's
+ * items: all of them can be made (the game stops on one it can't).
+ */
+static void test_items(void)
+{
+    bs_assets *assets;
+    BS_CHECK_EQ_INT(bs_assets_open(&vfs, &assets), BS_OK);
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    uint8_t *data;
+    size_t n;
+    static bs_item_tables tables;
+    BS_CHECK_EQ_INT(bs_vfs_read(&vfs, "GAME.EXE", &a, &data, &n), BS_OK);
+    BS_CHECK_EQ_INT(bs_item_tables_read(data, n, &tables), BS_OK);
+    BS_CHECK(strcmp(tables.bases[0].name, "Dagger") == 0);
+    BS_CHECK(strcmp(tables.bases[42].name, "Coffer of Restoration") == 0);
+    BS_CHECK(tables.bases[16].container && tables.bases[17].container && tables.bases[18].container &&
+             tables.bases[42].container && !tables.bases[15].container);
+    BS_CHECK_EQ_INT(tables.weapons[3].damage_min, 4); /* Broad Sword 4-12, Long Blade */
+    BS_CHECK_EQ_INT(tables.weapons[3].damage_max, 12);
+    BS_CHECK_EQ_INT(tables.weapons[3].skill, 15);
+    BS_CHECK(strcmp(tables.materials[9], "Daedric") == 0);
+    static bs_spell spells[BS_SPELL_COUNT];
+    BS_CHECK_EQ_INT(bs_spells_read(data, n, spells), BS_OK);
+    BS_CHECK(strcmp(spells[0].name, "Monster Summoning") == 0 && strcmp(spells[20].name, "Cure Health") == 0);
+    BS_CHECK(strcmp(spells[30].name, "Dispel Sigil") == 0);
+    BS_CHECK(spells[20].magnitude_min == 2 && spells[20].magnitude_max == 20 && spells[7].duration_base == 5);
+    /* Schools' skills: Cause Damage Destruction (8), Cure Health Restoration (9), Summoning Thaumaturgy (12);
+     * hostile spells are touch by default, Teleport on oneself only. */
+    BS_CHECK(spells[17].skill == 8 && spells[20].skill == 9 && spells[0].skill == 12);
+    BS_CHECK(spells[17].delivery == BS_DELIVERY_TOUCH && spells[17].target == BS_TARGET_OTHER);
+    BS_CHECK(spells[24].target == BS_TARGET_SELF && spells[20].delivery == BS_DELIVERY_CASTER);
+    BS_CHECK(spells[8].icon == 8 && spells[17].cost == 60 && spells[0].cost == 50);
+    for (int i = 0; i < BS_SPELL_COUNT; i++)
+        BS_CHECK(spells[i].element < BS_ELEMENT_COUNT && spells[i].delivery < BS_DELIVERY_COUNT &&
+                 spells[i].detonation >= 0 && spells[i].detonation < BS_DETONATION_COUNT && spells[i].skill >= 8 &&
+                 spells[i].skill <= 13 && (spells[i].icon < 27 || spells[i].icon >= 200)); /* 200+: unused spells */
+    /* The model names, through the loaded image (pointers). */
+    bs_le_image img;
+    BS_CHECK_EQ_INT(bs_le_load(data, n, &a, &img), BS_OK);
+    BS_CHECK_EQ_INT(bs_item_models_read(&img, &tables), BS_OK);
+    BS_CHECK(strcmp(tables.models[0], "bataxe.3d") == 0 && strcmp(tables.models[39], "arrow.3d") == 0);
+    BS_CHECK(strcmp(tables.models[11], "bow.3d") == 0 && strcmp(tables.models[19], "bow.3d") == 0);
+    char mbuf[16];
+    BS_CHECK(strcmp(bs_item_model_name(&tables, 0, 0, mbuf), "dagger.3d") == 0);
+    BS_CHECK(strcmp(bs_item_model_name(&tables, 3, 0, mbuf), "brdsword.3d") == 0);
+    /* Every item's model exists. */
+    for (uint32_t b = 0; b < BS_ITEM_BASE_COUNT; b++) {
+        bs_item_model_name(&tables, b, 0, mbuf);
+        if (!bs_assets_model(assets, mbuf))
+            fprintf(stderr, "  base %u: no model '%s'\n", b, mbuf);
+        BS_CHECK(mbuf[0] && bs_assets_model(assets, mbuf) != NULL);
+    }
+    /* The weapons in hand (0xE34AD): every one's model exists. */
+    BS_CHECK_EQ_INT(bs_item_hand_models_read(&img, &tables), BS_OK);
+    BS_CHECK(strcmp(tables.hand_models[0], "edagger.3d") == 0 && strcmp(tables.hand_models[14], "espear.3d") == 0);
+    BS_CHECK(strcmp(tables.hand_models[1], "eloswrd.3d") == 0 && strcmp(tables.hand_models[9], "ebow.3d") == 0);
+    for (uint32_t b = 0; b <= BS_ITEM_LAST_WEAPON; b++)
+        BS_CHECK(bs_assets_model(assets, tables.hand_models[b]) != NULL);
+    for (int32_t sg = 9001; sg <= 9052; sg++)
+        BS_CHECK(bs_assets_model(assets, bs_item_model_name(&tables, BS_ITEM_SIGIL_AMULET, sg, mbuf)) != NULL);
+
+    bs_magic_table mg[2];
+    static const char *const files[2] = {"MG0_GEN.TXT", "MG2_SPC.TXT"};
+    for (int i = 0; i < 2; i++) {
+        BS_CHECK_EQ_INT(bs_assets_read(assets, files[i], &a, &data, &n), BS_OK);
+        BS_CHECK_EQ_INT(bs_magic_parse(data, n, &a, &mg[i]), BS_OK);
+    }
+    BS_CHECK_EQ_INT(mg[0].count, 212);
+    BS_CHECK_EQ_INT(mg[1].count, 232);
+    bs_item_db db = {.tables = &tables, .magic = {&mg[0], &mg[1]}};
+    const bs_magic *reiver = bs_item_db_magic(&db, 8011);
+    BS_CHECK(reiver && strcmp(reiver->name, "of the Moon Reiver") == 0);
+    bs_item sword = {.base = 3, .material = 0, .magic = 8011, .quantity = 1};
+    char name[96];
+    bs_item_name(&db, &sword, name, sizeof name);
+    BS_CHECK(strcmp(name, "Iron Broad Sword of the Moon Reiver") == 0);
+
+    /* Worn items' pictures: every BSI name. */
+    bs_bsa *bsi;
+    BS_CHECK_EQ_INT(bs_bsa_open_vfs(&vfs, "GAMEDATA/BSI.BSA", &bsi), BS_OK);
+    const char **pics = BS_ARENA_ARRAY(&a, const char *, bsi->count);
+    for (uint32_t i = 0; i < bsi->count; i++) {
+        char *pic = bs_arena_strdup(&a, bsi->records[i].name);
+        char *dot = strrchr(pic, '.');
+        if (dot)
+            *dot = '\0';
+        pics[i] = pic;
+    }
+    db.pictures = pics;
+    db.picture_count = bsi->count;
+
+    bs_level_table table;
+    BS_CHECK_EQ_INT(bs_vfs_read(&vfs, "GAMEDATA/LEVELS.TXT", &a, &data, &n), BS_OK);
+    BS_CHECK_EQ_INT(bs_levels_parse(data, n, &a, &table), BS_OK);
+    uint32_t containers = 0, items = 0, specs = 0, placed = 0, pictured = 0, unpictured = 0, books = 0;
+    bs_bsa *txt;
+    BS_CHECK_EQ_INT(bs_bsa_open_vfs(&vfs, "GAMEDATA/TXT.BSA", &txt), BS_OK);
+    for (size_t i = 0; i < table.count; i++) {
+        bs_bs6_level lvl;
+        BS_CHECK_EQ_INT(bs_assets_read(assets, table.levels[i].file, &a, &data, &n), BS_OK);
+        BS_CHECK_EQ_INT(bs_bs6_parse(data, n, &a, &lvl), BS_OK);
+        bs_items li = {0};
+        bs_rng r = {(uint32_t)i + 1};
+        bool mp = bs_level_game_type(&table.levels[i]) != BS_GAME_CAMPAIGN;
+        BS_CHECK_EQ_INT(bs_items_add_level(&li, &lvl, &db, bs_level_number(&table.levels[i]), mp,
+                                           table.levels[i].grid_cell, &r),
+                        BS_OK);
+        items += li.count;
+        containers += li.container_count;
+        for (uint32_t k = 0; k < li.count; k++) {
+            placed += li.items[k].place.where == BS_ITEM_FLOOR;
+            const bs_item *x = &li.items[k].item;
+            /* Potions cast spells 1-31, or are Restoration (40) or Water Breathing (39). */
+            if (x->base == BS_ITEM_POTION)
+                BS_CHECK((x->number >= 1 && x->number <= BS_SPELL_COUNT) || x->number == 39 || x->number == 40);
+            /* Books and scrolls have their text: bk?_NNN.txt. */
+            if (x->base == BS_ITEM_BOOK || x->base == BS_ITEM_SCROLL) {
+                bool found = false;
+                char suffix[16];
+                snprintf(suffix, sizeof suffix, "%03d.TXT", x->number);
+                for (uint32_t t = 0; t < txt->count && !found; t++)
+                    found = strlen(txt->records[t].name) == 11 && bs_strcasecmp(txt->records[t].name + 4, suffix) == 0 &&
+                            (txt->records[t].name[0] | 0x20) == 'b' && (txt->records[t].name[1] | 0x20) == 'k';
+                if (!found)
+                    fprintf(stderr, "  %s: no text for book %d\n", table.levels[i].file, x->number);
+                books += found;
+            }
+            /* Items with an icon show a picture that exists (slings have none). */
+            if (!tables.bases[x->base].icon[0])
+                continue;
+            char pic[16];
+            snprintf(pic, sizeof pic, "%s.BSI", x->picture);
+            if (x->picture[0] && bs_bsa_find(bsi, pic))
+                pictured++;
+            else if (x->base != 12) {
+                unpictured++;
+                fprintf(stderr, "  %s: base %u has no picture '%s'\n", table.levels[i].file, x->base, x->picture);
+            }
+        }
+        /* Every placement made an item. */
+        for (uint32_t k = 0; k < lvl.object_count; k++) {
+            bs_bs6_logic lg;
+            BS_CHECK_EQ_INT(bs_bs6_entity_logic(&lvl.objects[k].chunk, &a, &lg), BS_OK);
+            for (uint32_t p = 0; p < lg.prop_count; p++)
+                specs += lg.props[p].id == 105 || lg.props[p].id == 107 || lg.props[p].id == 115 ||
+                         lg.props[p].id == 116;
+        }
+        if (strcmp(table.levels[i].file, "l1.bs6") == 0) {
+            /* A level 1 chest (#330): magic gauntlets, a helmet and a magic spear. */
+            uint32_t chest = UINT32_MAX, list[8];
+            for (uint32_t k = 0; k < lvl.object_count; k++)
+                if (lvl.objects[k].id == 330)
+                    chest = k;
+            BS_CHECK(chest != UINT32_MAX && bs_items_is_container_object(&li, chest));
+            BS_CHECK_EQ_INT(bs_items_list(&li, (bs_item_place){BS_ITEM_IN_OBJECT, chest}, list, 8), 3);
+            BS_CHECK(li.items[list[0]].item.base == 29 && li.items[list[0]].item.magic == 9265);
+            BS_CHECK(li.items[list[1]].item.base == 24 && li.items[list[1]].item.magic == 0);
+            BS_CHECK(li.items[list[2]].item.base == 14 && li.items[list[2]].item.magic == 9242);
+        }
+        bs_items_free(&li);
+    }
+    BS_CHECK_EQ_INT(items, specs);
+    BS_CHECK_EQ_INT(containers, 115);
+    printf("  %u items: %u on the floor, the rest in %u containers; %u with pictures\n", items, placed, containers,
+           pictured);
+    BS_CHECK_EQ_INT(unpictured, 0);
+    printf("  %u books and scrolls with texts\n", books);
+    bs_bsa_close(txt);
+    BS_CHECK(pictured > 100);
+    bs_bsa_close(bsi);
+    bs_arena_free(&a);
+    bs_assets_close(assets);
+}
+
+/*
  * Every sound effect and voice clip is an 8-bit mono PCM WAV. Voices are all
  * 11025 Hz; effects use 11025 Hz (280), 32000 Hz (89) or 8114 Hz (1).
  */
@@ -670,6 +938,8 @@ int main(void)
     BS_RUN(test_separate_objects);
     BS_RUN(test_player_level1);
     BS_RUN(test_all_nodes);
+    BS_RUN(test_items);
+    BS_RUN(test_creatures);
     BS_RUN(test_all_sounds);
     BS_RUN(test_all_videos);
     bs_cdimage_close(cd);

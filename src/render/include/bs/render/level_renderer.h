@@ -70,6 +70,41 @@ void bs_level_renderer_place(bs_level_renderer *r, uint32_t object, const float 
 /* Shows or hides a separate object. */
 void bs_level_renderer_show(bs_level_renderer *r, uint32_t object, bool visible);
 
+/* Shows another image wherever the level uses the texture first named `name` (as the game swaps a
+ * counter's texture, 0x3E448). Returns how many materials changed. */
+uint32_t bs_level_renderer_set_texture(bs_level_renderer *r, const char *name, const bs_bsi_image *img);
+
+/* An extra copy of a separate object, drawn at its own placement. */
+typedef struct bs_level_instance {
+    uint32_t object;
+    bs_scene_xform xform;
+} bs_level_instance;
+
+/* Sets the extra copies drawn with the level (items lying where they were dropped), replacing the last set. */
+bs_result bs_level_renderer_set_instances(bs_level_renderer *r, const bs_level_instance *inst, uint32_t count);
+
+/* A sprite drawn with the level this frame (a monster): one frame of an image, standing on pos. */
+typedef struct bs_level_sprite {
+    const bs_bsi_image *image;   /* must stay alive while the renderer exists (its texture is kept) */
+    uint32_t frame;
+    float pos[3];                /* feet */
+    bool mirror;                 /* flipped left to right */
+} bs_level_sprite;
+
+/* Sets the sprites drawn with the level, replacing the last set. Sized as the level's flats (BHDR scale). */
+bs_result bs_level_renderer_set_sprites(bs_level_renderer *r, const bs_level_sprite *s, uint32_t count);
+
+/*
+ * Draws one separate object alone into a rectangle of the default
+ * framebuffer (x, y, w, h in window pixels from the top left of a window
+ * window_h high), unlit and without fog, as the inventory shows items
+ * (0x51030): turned by angles, at offset from a camera at the origin looking
+ * along +z (+y down), projected as x_ndc = sx * x / z, y_ndc = sy * y / z.
+ */
+void bs_level_renderer_draw_object(bs_level_renderer *r, uint32_t object, const int32_t angles[3],
+                                   const float offset[3], float sx, float sy, int x, int y, int w, int h,
+                                   int window_h);
+
 /* Current placements, indexed by level object (for bs_scene_raycast). */
 const bs_scene_xform *bs_level_renderer_xforms(const bs_level_renderer *r);
 

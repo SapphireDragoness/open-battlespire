@@ -11,6 +11,8 @@ static void test_strcasecmp(void)
     BS_CHECK(bs_strcasecmp("GAMEDATA", "gamedata") == 0);
     BS_CHECK(bs_strcasecmp("3D.BSA", "3d.bsa") == 0);
     BS_CHECK(bs_strcasecmp("a", "b") < 0);
+    BS_CHECK(bs_strncasecmp("SIGILF", "sigil", 5) == 0 && bs_strncasecmp("sig", "sigil", 5) != 0);
+    BS_CHECK(bs_strncasecmp("abc", "abd", 2) == 0 && bs_strncasecmp("abc", "abd", 3) < 0);
     BS_CHECK(bs_strcasecmp("ab", "a") > 0);
 }
 

@@ -34,7 +34,7 @@ static void setup(bs_arena *a, bs_collision_world *w)
     static const float p0[3] = {-50, 0, -50}, p1[3] = {50, 0, -50}, p2[3] = {50, 0, 50}, p3[3] = {-50, 0, 50};
     quad(&verts[12], p0, p1, p2, p3);
     batches[0] = (bs_scene_batch){0, 0, 12, -1};
-    batches[1] = (bs_scene_batch){0, 12, 6, 0};
+    batches[1] = (bs_scene_batch){3, 12, 6, 0};
     scene = (bs_scene){.vertices = verts, .vertex_count = 18, .batches = batches, .batch_count = 2,
                        .static_batch_count = 1};
     objects[0] = (bs_bs6_object){.id = 1, .pos = {500, -20, 0}};
@@ -81,9 +81,13 @@ static void test_segment(void)
     BS_CHECK(bs_collision_segment(&w, (const float[3]){0, -32, 0}, (const float[3]){0, 200, 0}, &t, &ob));
     BS_CHECK(near(t, 32.0f / 232.0f) && ob == -1);
     BS_CHECK(!bs_collision_segment(&w, (const float[3]){0, -32, 0}, (const float[3]){0, -10, 0}, &t, &ob));
-    /* The platform is found before the floor under it. */
-    BS_CHECK(bs_collision_segment(&w, (const float[3]){500, -52, 0}, (const float[3]){500, 200, 0}, &t, &ob));
-    BS_CHECK(ob == 0 && near(t, 32.0f / 252.0f));
+    /* The platform is found before the floor under it, with its material. */
+    uint32_t mat;
+    BS_CHECK(bs_collision_segment_material(&w, (const float[3]){500, -52, 0}, (const float[3]){500, 200, 0}, &t, &ob,
+                                           &mat));
+    BS_CHECK(ob == 0 && near(t, 32.0f / 252.0f) && mat == 3);
+    BS_CHECK(bs_collision_segment_material(&w, (const float[3]){0, -32, 0}, (const float[3]){0, 200, 0}, &t, &ob, &mat));
+    BS_CHECK(ob == -1 && mat == 0);
     /* Moved up by 40: the probe now starts below it and finds the floor. */
     bs_collision_place(&w, 0, (const float[3]){500, -60, 0}, (const int32_t[3]){0, 0, 0});
     BS_CHECK(bs_collision_segment(&w, (const float[3]){500, -52, 0}, (const float[3]){500, 200, 0}, &t, &ob));
@@ -95,6 +99,14 @@ static void test_segment(void)
     /* The wall, crossed horizontally. */
     BS_CHECK(bs_collision_segment(&w, (const float[3]){50, -30, 0}, (const float[3]){150, -30, 0}, &t, &ob));
     BS_CHECK(near(t, 0.5f) && ob == -1);
+    /* Removed (an item taken): neither probe nor body finds it any more. */
+    bs_collision_remove(&w, 0);
+    BS_CHECK(bs_collision_segment(&w, (const float[3]){500, -60, -100}, (const float[3]){500, -60, 100}, &t, &ob) ==
+             false);
+    bs_collision_hit h[4];
+    BS_CHECK_EQ_INT(bs_collision_sphere(&w, (const float[3]){500, -60, 0}, 7, h, 4), 0);
+    bs_collision_place(&w, 0, (const float[3]){500, -60, 0}, (const int32_t[3]){0, 0, 0}); /* no effect */
+    BS_CHECK_EQ_INT(bs_collision_sphere(&w, (const float[3]){500, -60, 0}, 7, h, 4), 0);
     bs_arena_free(&a);
 }
 

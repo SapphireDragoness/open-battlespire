@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "bs/core/fs.h"
+#include "bs/formats/items.h"
 
 /* Average colour of an image's bottom rows: the sky at the horizon. */
 static void horizon_color(const bs_bsi_image *sky, float out[3])
@@ -87,6 +88,13 @@ static void apply_settings(bs_level_view *v, bs_assets *assets, const bs_vfs *vf
 bs_result bs_level_view_load(bs_level_view *v, bs_assets *assets, const bs_vfs *vfs, const char *file,
                              const bs_level_info *info, float fog_scale, bs_render_settings *settings)
 {
+    return bs_level_view_load_ex(v, assets, vfs, file, info, fog_scale, settings, NULL, 0);
+}
+
+bs_result bs_level_view_load_ex(bs_level_view *v, bs_assets *assets, const bs_vfs *vfs, const char *file,
+                                const bs_level_info *info, float fog_scale, bs_render_settings *settings,
+                                const char *const *extra_models, uint32_t extra_count)
+{
     bs_level_view_unload(v);
     snprintf(v->file, sizeof v->file, "%s", file);
     v->info = info;
@@ -96,46 +104,67 @@ bs_result bs_level_view_load(bs_level_view *v, bs_assets *assets, const bs_vfs *
     bs_result r = bs_assets_read(assets, file, &v->arena, &data, &size);
     if (r == BS_OK)
         r = bs_bs6_parse(data, size, &v->arena, &v->level);
-    /* Objects with controllers or links get their own geometry so they can move and be used. */
+    /* Objects with controllers or links get their own geometry so they can move and be used, and
+     * so do items, which can be taken away. */
+    uint32_t nobj = v->level.object_count, extras = 1 + extra_count;
     bool *separate = NULL;
     if (r == BS_OK) {
-        separate = BS_ARENA_ARRAY(&v->arena, bool, v->level.object_count + 2);
+        separate = BS_ARENA_ARRAY(&v->arena, bool, nobj + extras + 1);
         r = separate ? BS_OK : BS_ERR_NOMEM;
     }
-    for (uint32_t i = 0; r == BS_OK && i < v->level.object_count; i++) {
+    for (uint32_t i = 0; r == BS_OK && i < nobj; i++) {
         bs_bs6_logic g;
         r = bs_bs6_entity_logic(&v->level.objects[i].chunk, &v->arena, &g);
-        separate[i] = r == BS_OK && (g.ctrl_count || g.link_count);
+        /* ... and gems (properties 110, 111), objects keys open (103) and sigils, which can vanish. */
+        const bs_bs6_object *o = &v->level.objects[i];
+        const char *model = o->model < v->level.model_count ? v->level.model_names[o->model] : "";
+        bool sigil = bs_strncasecmp(model, "sigil", 5) == 0 && model[5];
+        separate[i] = r == BS_OK && (g.ctrl_count || g.link_count || bs_bs6_logic_has_items(&g) || sigil ||
+                                     bs_bs6_logic_prop(&g, 103) || bs_bs6_logic_prop(&g, 110) ||
+                                     bs_bs6_logic_prop(&g, 111));
     }
-    /* The jump pointer (jumper.3d, loaded by the game at 0x1087B) as one more,
-     * hidden, separate object after the level's own. */
+    /* More hidden, separate objects after the level's own: the jump pointer
+     * (jumper.3d, loaded by the game at 0x1087B), then the extra models. */
     bs_bs6_level drawn = v->level;
-    v->jump_pointer = UINT32_MAX;
-    if (r == BS_OK && bs_assets_model(assets, "jumper")) {
-        bs_bs6_object *objs = BS_ARENA_ARRAY(&v->arena, bs_bs6_object, v->level.object_count + 1);
-        const char **names = BS_ARENA_ARRAY(&v->arena, const char *, v->level.model_count + 1);
-        if (objs && names) {
-            memcpy(objs, v->level.objects, sizeof *objs * v->level.object_count);
-            memcpy(names, v->level.model_names, sizeof *names * v->level.model_count);
-            names[v->level.model_count] = "jumper";
-            memset(&objs[v->level.object_count], 0, sizeof *objs);
-            objs[v->level.object_count].id = UINT32_MAX;
-            objs[v->level.object_count].model = v->level.model_count;
-            drawn.objects = objs;
+    v->jump_pointer = v->extra_first = UINT32_MAX;
+    bs_bs6_object *objs = r == BS_OK ? BS_ARENA_ARRAY(&v->arena, bs_bs6_object, nobj + extras) : NULL;
+    const char **names = r == BS_OK ? BS_ARENA_ARRAY(&v->arena, const char *, v->level.model_count + extras) : NULL;
+    if (objs && names) {
+        memcpy(objs, v->level.objects, sizeof *objs * nobj);
+        memcpy(names, v->level.model_names, sizeof *names * v->level.model_count);
+        drawn.objects = objs;
+        drawn.model_names = names;
+        for (uint32_t k = 0; k < extras; k++) {
+            const char *name = k == 0 ? "jumper" : extra_models[k - 1];
+            if (k == 0 && !bs_assets_model(assets, name))
+                continue;
+            /* Level model names have no extension. */
+            char base[64];
+            snprintf(base, sizeof base, "%s", name ? name : "");
+            char *dot = strrchr(base, '.');
+            if (dot)
+                *dot = '\0';
+            names[drawn.model_count] = bs_arena_strdup(&v->arena, base);
+            bs_bs6_object *o = &objs[drawn.object_count];
+            memset(o, 0, sizeof *o);
+            o->id = UINT32_MAX;
+            o->model = drawn.model_count++;
+            separate[drawn.object_count] = true;
+            if (k == 0)
+                v->jump_pointer = drawn.object_count;
+            else if (k == 1)
+                v->extra_first = drawn.object_count;
             drawn.object_count++;
-            drawn.model_names = names;
-            drawn.model_count++;
-            separate[v->level.object_count] = true;
-            v->jump_pointer = v->level.object_count;
         }
+        v->extra_count = v->extra_first == UINT32_MAX ? 0 : extra_count;
     }
     if (r == BS_OK)
         r = bs_scene_build_ex(assets, &drawn, separate, &v->arena, &v->scene);
     const bs_bsi_image *sky = info && info->sky[0] ? bs_assets_image(assets, info->sky) : NULL;
     if (r == BS_OK)
         r = bs_level_renderer_create(&v->scene, &drawn, sky, &v->renderer);
-    if (r == BS_OK && v->jump_pointer != UINT32_MAX)
-        bs_level_renderer_show(v->renderer, v->jump_pointer, false);
+    for (uint32_t i = nobj; r == BS_OK && i < drawn.object_count; i++)
+        bs_level_renderer_show(v->renderer, i, false);
     if (r != BS_OK) {
         bs_arena_free(&v->arena);
         memset(v, 0, sizeof *v);

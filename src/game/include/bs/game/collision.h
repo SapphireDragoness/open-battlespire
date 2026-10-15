@@ -18,6 +18,7 @@
 typedef struct bs_collision_tri {
     float v[3][3];
     float n[3];        /* unit face normal (model's winding) */
+    uint32_t material; /* the scene material */
 } bs_collision_tri;
 
 typedef struct bs_collision_object {
@@ -52,6 +53,9 @@ bs_result bs_collision_build(const bs_scene *scene, const bs_bs6_level *level, b
 /* Moves a separate object. */
 void bs_collision_place(bs_collision_world *w, uint32_t object, const float pos[3], const int32_t angles[3]);
 
+/* Takes a separate object out of the world (an item picked up). */
+void bs_collision_remove(bs_collision_world *w, uint32_t object);
+
 /* Triangles a sphere overlaps; returns how many (at most max are stored). */
 uint32_t bs_collision_sphere(const bs_collision_world *w, const float center[3], float radius,
                              bs_collision_hit *hits, uint32_t max);
@@ -60,5 +64,10 @@ uint32_t bs_collision_sphere(const bs_collision_world *w, const float center[3],
  * fraction along the segment, *object the level object or -1. */
 bool bs_collision_segment(const bs_collision_world *w, const float from[3], const float to[3], float *t,
                           int32_t *object);
+
+/* As bs_collision_segment, also giving the scene material of the triangle crossed (the game's floor face,
+ * 0x3DADEC, whose texture some level exits look for). */
+bool bs_collision_segment_material(const bs_collision_world *w, const float from[3], const float to[3], float *t,
+                                   int32_t *object, uint32_t *material);
 
 #endif

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bs/core/fs.h"
 #include "bs/core/log.h"
 #include "bs/formats/palette.h"
 #include "bs/render/gl.h"
@@ -14,6 +15,7 @@
 #define PLAYER_LIGHT_LEVELS 40.0f    /* measured in two memory dumps */
 #define PLAYER_LIGHT_RADIUS 384.0f
 #define BHDR_FRAME_MS 8              /* BSI header field 8: frame time in ms (inferred; 71 like FLIC) */
+#define BHDR_SCALE 11                /* field 11: the scale in 1/256 (see assets/scene.c) */
 #define SKY_REPEATS 4.0f             /* sky texture repeats around the horizon (approximation) */
 
 /*
@@ -206,6 +208,14 @@ struct bs_level_renderer {
     bs_scene_xform *xforms;   /* per level object: placement of separate objects */
     bool *hidden;             /* per level object */
     uint32_t object_count;
+    uint32_t *object_first, *object_batches;  /* per level object: its batches (they are grouped) */
+    bs_level_instance *instances;
+    uint32_t instance_count, instance_cap;
+    bs_level_sprite *dyn;            /* sprites set for the frame */
+    uint32_t dyn_count, dyn_cap;
+    const bs_bsi_image **dyn_images; /* their images' textures, kept */
+    GLuint *dyn_textures;
+    uint32_t dyn_image_count, dyn_image_cap;
     program geometry, sprite;
     GLuint sky_program;
     GLint sky_tex, sky_fwd, sky_right, sky_up, sky_tan, sky_repeats, sky_fog, sky_fog_on;
@@ -352,6 +362,8 @@ static void apply_filters(bs_level_renderer *r, bool classic)
         set_filter(r->materials[i].texture, classic);
     for (uint32_t i = 0; i < r->sprite_count; i++)
         set_filter(r->sprites[i].texture, classic);
+    for (uint32_t i = 0; i < r->dyn_image_count; i++)
+        set_filter(r->dyn_textures[i], classic);
     set_filter(r->sky_texture, classic);
     r->classic_filters = classic;
 }
@@ -432,9 +444,18 @@ bs_result bs_level_renderer_create(const bs_scene *scene, const bs_bs6_level *le
         float pos[3] = {(float)o->pos[0], (float)o->pos[1], (float)o->pos[2]};
         r->xforms[i] = bs_scene_object_xform(o->angles, pos);
     }
+    r->object_first = calloc(level->object_count + 1, sizeof *r->object_first);
+    r->object_batches = calloc(level->object_count + 1, sizeof *r->object_batches);
+    for (uint32_t i = 0; r->object_first && r->object_batches && i < scene->batch_count; i++) {
+        int32_t ob = scene->batches[i].object;
+        if (ob < 0 || (uint32_t)ob >= level->object_count)
+            continue;
+        if (!r->object_batches[ob]++)
+            r->object_first[ob] = i;
+    }
     r->materials = calloc(scene->material_count + 1, sizeof *r->materials);
     r->sprites = calloc(scene->sprite_count + 1, sizeof *r->sprites);
-    if (!r->materials || !r->sprites || !r->xforms || !r->hidden) {
+    if (!r->materials || !r->sprites || !r->xforms || !r->hidden || !r->object_first || !r->object_batches) {
         bs_level_renderer_destroy(r);
         return BS_ERR_NOMEM;
     }
@@ -532,6 +553,11 @@ void bs_level_renderer_destroy(bs_level_renderer *r)
                 glDeleteTextures(1, &r->materials[i].texture);
     for (uint32_t i = 0; i < r->sprite_count; i++)
         glDeleteTextures(1, &r->sprites[i].texture);
+    for (uint32_t i = 0; i < r->dyn_image_count; i++)
+        glDeleteTextures(1, &r->dyn_textures[i]);
+    free(r->dyn);
+    free(r->dyn_images);
+    free(r->dyn_textures);
     if (r->sky_texture)
         glDeleteTextures(1, &r->sky_texture);
     if (r->water_texture)
@@ -546,6 +572,9 @@ void bs_level_renderer_destroy(bs_level_renderer *r)
     glDeleteVertexArrays(1, &r->empty_vao);
     free(r->xforms);
     free(r->hidden);
+    free(r->object_first);
+    free(r->object_batches);
+    free(r->instances);
     glDeleteProgram(r->geometry.id);
     glDeleteProgram(r->sprite.id);
     glDeleteProgram(r->sky_program);
@@ -653,6 +682,69 @@ static void set_shading(const program *p, const bs_level_renderer *r, const bs_c
     glUniform1f(p->player_brightness, PLAYER_LIGHT_LEVELS / 31.0f);
 }
 
+/* An object's batches with a placement (the geometry program in use, its VAO bound). */
+static void draw_object_batches(const bs_level_renderer *r, uint32_t object, const bs_scene_xform *x)
+{
+    if (object >= r->object_count || !r->object_batches[object])
+        return;
+    float model[16];
+    xform_matrix(x, model);
+    glUniformMatrix4fv(r->geometry.model, 1, GL_FALSE, model);
+    for (uint32_t i = r->object_first[object]; i < r->object_first[object] + r->object_batches[object]; i++) {
+        const bs_scene_batch *b = &r->scene->batches[i];
+        const gpu_material *m = &r->materials[b->material];
+        glUniform1i(r->geometry.textured, m->texture != 0);
+        glUniform4f(r->geometry.color, m->color[0], m->color[1], m->color[2], m->color[3]);
+        glBindTexture(GL_TEXTURE_2D, m->texture);
+        glDrawArrays(GL_TRIANGLES, (GLint)b->first, (GLsizei)b->count);
+    }
+}
+
+/* The texture of a sprite image, uploaded the first time (all frames, stacked). */
+static GLuint dynamic_texture(bs_level_renderer *r, const bs_bsi_image *img)
+{
+    for (uint32_t i = 0; i < r->dyn_image_count; i++)
+        if (r->dyn_images[i] == img)
+            return r->dyn_textures[i];
+    if (r->dyn_image_count == r->dyn_image_cap) {
+        uint32_t cap = r->dyn_image_cap ? r->dyn_image_cap * 2 : 32;
+        const bs_bsi_image **im = realloc(r->dyn_images, sizeof *im * cap);
+        if (!im)
+            return 0;
+        r->dyn_images = im;
+        GLuint *t = realloc(r->dyn_textures, sizeof *t * cap);
+        if (!t)
+            return 0;
+        r->dyn_textures = t;
+        r->dyn_image_cap = cap;
+    }
+    GLuint t = upload_image(img, img->frames ? img->frames : 1, false);
+    set_filter(t, r->classic_filters);
+    r->dyn_images[r->dyn_image_count] = img;
+    r->dyn_textures[r->dyn_image_count++] = t;
+    return t;
+}
+
+/* A sprite standing on its position, sized by its BHDR scale as the level's figures (assets/scene.c). */
+static void draw_dynamic_sprite(bs_level_renderer *r, const bs_level_sprite *sp)
+{
+    const bs_bsi_image *img = sp->image;
+    if (!img || !img->width || !img->height)
+        return;
+    GLuint t = dynamic_texture(r, img);
+    if (!t)
+        return;
+    uint32_t frames = img->frames ? img->frames : 1;
+    int scale = img->bhdr[BHDR_SCALE];
+    float k = scale > 0 ? (float)scale / 256.0f : 1.0f;
+    float w = (float)img->width * k, h = (float)img->height * k;
+    glUniform3f(r->sprite.center, sp->pos[0], sp->pos[1] - h * 0.5f, sp->pos[2]);
+    glUniform2f(r->sprite.size, sp->mirror ? -w : w, h);
+    glUniform2f(r->sprite.frame, (float)(sp->frame % frames) / (float)frames, 1.0f / (float)frames);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+}
+
 static void draw_scene(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int w, int h,
                        double time)
 {
@@ -719,7 +811,9 @@ static void draw_scene(bs_level_renderer *r, const bs_camera *cam, const bs_rend
         glDrawArrays(GL_TRIANGLES, (GLint)b->first, (GLsizei)b->count);
     }
 
-    if (placed != -1)
+    for (uint32_t k = 0; k < r->instance_count; k++)
+        draw_object_batches(r, r->instances[k].object, &r->instances[k].xform);
+    if (placed != -1 || r->instance_count)
         glUniformMatrix4fv(r->geometry.model, 1, GL_FALSE, identity4);
     if (r->water_vao) {
         glDisable(GL_CULL_FACE); /* visible from below too */
@@ -748,6 +842,8 @@ static void draw_scene(bs_level_renderer *r, const bs_camera *cam, const bs_rend
             glBindTexture(GL_TEXTURE_2D, g->texture);
             glDrawArrays(GL_TRIANGLES, 0, 6);
         }
+        for (uint32_t i = 0; s->sprites && i < r->dyn_count; i++)
+            draw_dynamic_sprite(r, &r->dyn[i]);
     }
     glBindVertexArray(0);
 }
@@ -842,4 +938,94 @@ void bs_level_renderer_show(bs_level_renderer *r, uint32_t object, bool visible)
 {
     if (object < r->object_count)
         r->hidden[object] = !visible;
+}
+
+bs_result bs_level_renderer_set_instances(bs_level_renderer *r, const bs_level_instance *inst, uint32_t count)
+{
+    if (count > r->instance_cap) {
+        bs_level_instance *n = realloc(r->instances, sizeof *n * count);
+        if (!n)
+            return BS_ERR_NOMEM;
+        r->instances = n;
+        r->instance_cap = count;
+    }
+    if (count)
+        memcpy(r->instances, inst, sizeof *inst * count);
+    r->instance_count = count;
+    return BS_OK;
+}
+
+void bs_level_renderer_draw_object(bs_level_renderer *r, uint32_t object, const int32_t angles[3],
+                                   const float offset[3], float sx, float sy, int x, int y, int w, int h,
+                                   int window_h)
+{
+    if (object >= r->object_count || w <= 0 || h <= 0)
+        return;
+    /* Camera space is game space here: +x right, +y down, +z ahead. Clip: x_c = sx x, y_c = -sy y (up),
+     * w_c = z; depth over 4 .. 60000 as the level's. */
+    float n = 4.0f, fa = 60000.0f;
+    float proj[16] = {
+        sx, 0, 0, 0,
+        0, -sy, 0, 0,
+        0, 0, (fa + n) / (fa - n), 1,
+        0, 0, -2 * fa * n / (fa - n), 0,
+    };
+    bs_scene_xform xf = bs_scene_object_xform(angles, offset);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(x, window_h - y - h, w, h);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(x, window_h - y - h, w, h);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glActiveTexture(GL_TEXTURE0);
+    bs_render_settings s = bs_render_settings_default();
+    s.lighting = false;
+    s.fog = false;
+    bs_camera cam = {{0, 0, 0}, 0, 0, 1};
+    set_shading(&r->geometry, r, &cam, &s, proj);
+    glUniform1i(r->geometry.vertex_light, 0);
+    glBindVertexArray(r->vao);
+    draw_object_batches(r, object, &xf);
+    glBindVertexArray(0);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+}
+
+uint32_t bs_level_renderer_set_texture(bs_level_renderer *r, const char *name, const bs_bsi_image *img)
+{
+    if (!img || !img->width || !img->height)
+        return 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < r->scene->material_count; i++) {
+        const bs_scene_material *m = &r->scene->materials[i];
+        if (m->kind != BS_SCENE_MAT_TEXTURE || bs_strcasecmp(m->name, name) != 0)
+            continue;
+        GLuint t = upload_image(img, 1, true);
+        if (!t)
+            continue;
+        set_filter(t, r->classic_filters);
+        if (r->materials[i].texture)
+            glDeleteTextures(1, &r->materials[i].texture);
+        r->materials[i].texture = t;
+        n++;
+    }
+    return n;
+}
+
+bs_result bs_level_renderer_set_sprites(bs_level_renderer *r, const bs_level_sprite *sp, uint32_t count)
+{
+    if (count > r->dyn_cap) {
+        bs_level_sprite *n = realloc(r->dyn, sizeof *n * count);
+        if (!n)
+            return BS_ERR_NOMEM;
+        r->dyn = n;
+        r->dyn_cap = count;
+    }
+    if (count)
+        memcpy(r->dyn, sp, sizeof *sp * count);
+    r->dyn_count = count;
+    return BS_OK;
 }

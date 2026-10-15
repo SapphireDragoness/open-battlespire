@@ -53,4 +53,7 @@ bool bs_path_join(char *out, size_t cap, const char *a, const char *b);
 /* ASCII case-insensitive string comparison (data file names are ASCII). */
 int bs_strcasecmp(const char *a, const char *b);
 
+/* As bs_strcasecmp, comparing at most n characters. */
+int bs_strncasecmp(const char *a, const char *b, size_t n);
+
 #endif

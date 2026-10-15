@@ -1,5 +1,6 @@
 #include <string.h>
 
+#include "bs/formats/exe_text.h"
 #include "bs/formats/le.h"
 #include "bs_test.h"
 #include "synth.h"
@@ -81,11 +82,41 @@ static void test_malformed(void)
     bs_arena_free(&a);
 }
 
+/* The message table: pointers into another object, found from "Exit the Automap.". */
+static void test_exe_text(void)
+{
+    static uint8_t strings[64], table[32];
+    static const char text[] = "x\0Exit the Automap.\0Second\0";
+    memcpy(strings, text, sizeof text);
+    const uint32_t ptrs[] = {0x2000 + 2, 0x2000 + 20, 0x2000 + 20, 0xDEADBEEF};
+    for (int i = 0; i < 4; i++)
+        for (int k = 0; k < 4; k++)
+            table[3 + 4 * i + k] = (uint8_t)(ptrs[i] >> (8 * k));
+    bs_le_object objs[2] = {
+        {.base = 0x1000, .mem_size = sizeof table, .data = table},
+        {.base = 0x2000, .mem_size = sizeof strings, .data = strings},
+    };
+    bs_le_image img = {.object_count = 2, .objects = objs};
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    bs_exe_text t;
+    BS_CHECK_EQ_INT(bs_exe_text_read(&img, &a, &t), BS_OK);
+    BS_CHECK_EQ_INT(t.count, 3);
+    BS_CHECK(strcmp(bs_exe_message(&t, 0), "Exit the Automap.") == 0);
+    BS_CHECK(strcmp(bs_exe_message(&t, 2), "Second") == 0);
+    BS_CHECK(strcmp(bs_exe_message(&t, 3), "") == 0);
+    /* No table. */
+    table[3] = 0;
+    BS_CHECK_EQ_INT(bs_exe_text_read(&img, &a, &t), BS_ERR_NOT_FOUND);
+    bs_arena_free(&a);
+}
+
 int main(void)
 {
     exe_size = synth_le(exe, sizeof exe);
     BS_CHECK(exe_size > 0);
     BS_RUN(test_load);
     BS_RUN(test_malformed);
+    BS_RUN(test_exe_text);
     return BS_TEST_RESULT();
 }

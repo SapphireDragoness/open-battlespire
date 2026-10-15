@@ -35,6 +35,7 @@ typedef ptrdiff_t GLintptr;
 #define GL_DEPTH_BUFFER_BIT 0x00000100
 #define GL_COLOR_BUFFER_BIT 0x00004000
 #define GL_TRIANGLES 0x0004
+#define GL_TRIANGLE_STRIP 0x0005
 #define GL_LEQUAL 0x0203
 #define GL_LESS 0x0201
 #define GL_SRC_ALPHA 0x0302
@@ -44,6 +45,7 @@ typedef ptrdiff_t GLintptr;
 #define GL_CULL_FACE 0x0B44
 #define GL_DEPTH_TEST 0x0B71
 #define GL_BLEND 0x0BE2
+#define GL_SCISSOR_TEST 0x0C11
 #define GL_UNPACK_ALIGNMENT 0x0CF5
 #define GL_PACK_ALIGNMENT 0x0D05
 #define GL_TEXTURE_2D 0x0DE1
@@ -89,6 +91,7 @@ typedef ptrdiff_t GLintptr;
 /* X(return type, name, parameter list) */
 #define BS_GL_FUNCTIONS(X)                                                                          \
     X(void, glViewport, (GLint x, GLint y, GLsizei w, GLsizei h))                                   \
+    X(void, glScissor, (GLint x, GLint y, GLsizei w, GLsizei h))                                    \
     X(void, glClear, (GLbitfield mask))                                                             \
     X(void, glClearColor, (GLfloat r, GLfloat g, GLfloat b, GLfloat a))                             \
     X(void, glEnable, (GLenum cap))                                                                 \
@@ -167,6 +170,7 @@ BS_GL_FUNCTIONS(BS_GL_DECLARE)
 
 /* Call through the loaded pointers with the usual names. */
 #define glViewport bs_glViewport
+#define glScissor bs_glScissor
 #define glClear bs_glClear
 #define glClearColor bs_glClearColor
 #define glEnable bs_glEnable

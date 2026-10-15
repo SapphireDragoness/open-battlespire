@@ -1,6 +1,7 @@
 #include "synth.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 /* Little-endian writer over a fixed buffer; sets ok = 0 on overflow. */
@@ -906,3 +907,233 @@ size_t synth_nodes(uint8_t *out, size_t cap)
     nav_node(&b, 2, 1, -2, 23, 9, 1, l2);
     return done(&b);
 }
+
+size_t synth_item_exe(uint8_t *out, size_t cap)
+{
+    w b = { out, 0, cap, 1 };
+    fill(&b, 0xCC, 100);
+    for (uint32_t i = 0; i < 16; i++) {
+        uint32_t skill = i == 0 ? 14 : i == 15 ? 16 : 15 + i % 5;
+        u32(&b, i);
+        u32(&b, 1 + (i >= 4));
+        u32(&b, 0);
+        u32(&b, i + 1);
+        u32(&b, i + 6);
+        u32(&b, skill);
+    }
+    for (uint32_t i = 0; i < 43; i++) {
+        uint8_t r[0x2F2];
+        memset(r, 0, sizeof r);
+        const char *name = i == 0 ? "Dagger" : i == 1 ? "Short Sword" : i == 3 ? "Broad Sword" : i == 15 ? "Potion"
+                         : i == 16 ? "Sack" : i == 19 ? "Clothes" : i == 22 ? "Arrow" : i == 24 ? "Helmet"
+                         : i == 31 ? "Sigil Amulet" : i == 32 ? "Book" : NULL;
+        if (name)
+            memcpy(r, name, strlen(name));
+        else
+            r[0] = 'I', r[1] = 't', r[2] = 'e', r[3] = 'm', r[4] = ' ', r[5] = (uint8_t)('0' + i / 10),
+            r[6] = (uint8_t)('0' + i % 10);
+        r[0x20] = (uint8_t)i;
+        /* Icons: weapons "mwpns6NN", Clothes "x", helmet "hlmt", cuirass "brst", none for the rest. */
+        if (i <= 14) {
+            memcpy(r + 0x22, "mwpns6", 6);
+            r[0x28] = (uint8_t)('0' + i / 10);
+            r[0x29] = (uint8_t)('0' + i % 10);
+        } else if (i == 19) {
+            r[0x22] = 'x';
+        } else if (i == 24) {
+            memcpy(r + 0x22, "hlmt", 4);
+        } else if (i == 25) {
+            memcpy(r + 0x22, "brst", 4);
+        }
+        r[0x2B] = r[0x2F] = (uint8_t)(100 + i);
+        r[0x33] = 7;
+        r[0x35] = (uint8_t)(i + 1);
+        r[0x42] = (i >= 16 && i <= 18) || i == 42;
+        put(&b, r, sizeof r);
+    }
+    static const char materials[] = "\0Iron\0Steel\0Silver\0Elven\0Dwarven\0Mithril\0Adamantium\0Ebony\0Orcish\0Daedric";
+    put(&b, materials, sizeof materials);
+    return done(&b);
+}
+
+static void le_stru(w *b, int32_t id, const int32_t *v, int n)
+{
+    size_t st = le_chunk_begin(b, "STRU");
+    le_i32(b, "IDNB", id);
+    put(b, "RAWD", 4);
+    u32(b, (uint32_t)(n * 4));
+    for (int i = 0; i < n; i++)
+        u32(b, (uint32_t)v[i]);
+    le_chunk_end(b, st);
+}
+
+size_t synth_bs6_items(uint8_t *out, size_t cap)
+{
+    w b = { out, 0, cap, 1 };
+    size_t gnrl = le_chunk_begin(&b, "GNRL");
+    size_t objs = le_chunk_begin(&b, "OBJS");
+    put(&b, "LFIL", 4);
+    u32(&b, 260);
+    put(&b, "box", 3);
+    fill(&b, 0, 257);
+    static const int32_t arrows[] = { 22, 0, 1, 10000 }, clothes[] = { 10000, 19, 0, 0 }, sound[] = { 362, 1 },
+                         magic[] = { 7001, 3, 0, 1 }, potion[] = { 21 }, book[] = { 993 };
+    size_t o = le_object_begin(&b, 30, 0);
+    le_stru(&b, 105, arrows, 4);
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 31, 100);
+    le_stru(&b, 116, clothes, 4);
+    le_stru(&b, 121, sound, 2);
+    le_stru(&b, 116, magic, 4);
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 32, 200);
+    le_ctrl(&b, 16, NULL, 0, NULL);
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 33, 300);
+    le_stru(&b, 115, potion, 1);
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 34, 400);
+    le_stru(&b, 107, book, 1);
+    le_chunk_end(&b, o);
+    le_chunk_end(&b, objs);
+    le_chunk_end(&b, gnrl);
+    return done(&b);
+}
+
+size_t synth_creature_exe(uint8_t *out, size_t cap)
+{
+    w b = { out, 0, cap, 1 };
+    /* The spell lists right before the table, as in GAME.EXE: [18] then [9, 12]. */
+    fill(&b, 0, 95);
+    static const uint8_t lists[5] = { 18, 0, 9, 12, 0 };
+    put(&b, lists, sizeof lists);
+    size_t table = b.len;
+    const uint32_t table_va = 0xE3559;
+    for (int i = 0; i < 16; i++) {
+        uint8_t r[0xCE];
+        memset(r, 0, sizeof r);
+        char name[32];
+        if (i == 0)
+            snprintf(name, sizeof name, "Scamp");
+        else if (i == 1)
+            snprintf(name, sizeof name, "Vermai");
+        else
+            snprintf(name, sizeof name, "Creature %d", i);
+        memcpy(r, name, strlen(name));
+        static const int32_t attrs[8] = { 20, 40, 10, 60, 20, 10, 65, 30 };
+        for (int k = 0; k < 8; k++) {
+            int32_t v = attrs[k] + (k == 0 ? i : 0);
+            memcpy(r + 0x20 + 4 * k, &v, 4);
+        }
+        int32_t health = 30 + 10 * i, skill = 20, flags = i == 13 ? 0x18000 : 0, level = 1, armour = 2;
+        memcpy(r + 0x44, &health, 4);
+        memcpy(r + 0x48, &skill, 4);
+        memcpy(r + 0x4C, &flags, 4);
+        memcpy(r + 0x6C, &level, 4);
+        memcpy(r + 0x70, &armour, 4);
+        if (i == 2 || i == 13) {
+            uint32_t a = table_va - 5, c = table_va - 3;
+            memcpy(r + 0x74, &a, 4);
+            if (i == 2)
+                memcpy(r + 0x78, &c, 4);
+        }
+        if (i == 8) {
+            r[0xAF] = 2; /* immune to fire */
+            r[0xBC] = 4; /* never resists cold */
+        }
+        r[0x7C] = 20;
+        static const int32_t weapon[6] = { 0, 0, 0, 1, 6, 16 };
+        memcpy(r + 0x7E, weapon, sizeof weapon);
+        put(&b, r, sizeof r);
+    }
+    for (int i = 0; i < 16; i++) {
+        uint8_t r[0x31F];
+        memset(r, 0, sizeof r);
+        char code[4];
+        snprintf(code, sizeof code, "%s", i == 0 ? "smp" : i == 1 ? "ver" : "cxx");
+        if (i >= 2) {
+            code[1] = (char)('0' + i / 10);
+            code[2] = (char)('0' + i % 10);
+        }
+        for (int v = 0; v < 5; v++) {
+            snprintf((char *)r + 13 * v, 13, "%sw%02d.bsi", code, v);
+            snprintf((char *)r + 13 * (5 + v), 13, "%sa%02d.bsi", code, v);
+            snprintf((char *)r + 13 * (40 + v), 13, "%ss%02d.bsi", code, v);
+        }
+        snprintf((char *)r + 13 * 45, 13, "%sd00.bsi", code);
+        put(&b, r, sizeof r);
+    }
+    pad_to(&b, table + 0x4B48);
+    for (int l = 0; l < 9; l++)
+        for (int k = 0; k < 4; k++)
+            u8(&b, (uint8_t)((l + k) % 16));
+    pad_to(&b, table + 0xBD06);
+    for (int i = 0; i < 16; i++)
+        for (int k = 0; k < 4; k++)
+            u32(&b, (uint32_t)(400 + 4 * i + k));
+    fill(&b, 0, 16);
+    return done(&b);
+}
+
+static size_t le_flat_begin(w *b, int32_t id, const char *name, int32_t x, int32_t z)
+{
+    size_t f = le_chunk_begin(b, "FLAD");
+    le_i32(b, "IDNB", id);
+    le_name(b, "FILN", name);
+    const int32_t pos[3] = { x, -10, z };
+    le_i32s(b, "POSI", pos, 3);
+    le_i32(b, "SCAL", 0);
+    le_i32(b, "AMBI", 0);
+    le_i32(b, "SELE", 0);
+    return f;
+}
+
+static void le_code(w *b, const char *code)
+{
+    size_t st = le_chunk_begin(b, "STRU");
+    le_i32(b, "IDNB", 108);
+    put(b, "RAWD", 4);
+    u32(b, 4);
+    put(b, code, 3);
+    u8(b, 0);
+    le_chunk_end(b, st);
+}
+
+size_t synth_bs6_monsters(uint8_t *out, size_t cap)
+{
+    w b = { out, 0, cap, 1 };
+    size_t gnrl = le_chunk_begin(&b, "GNRL");
+    size_t objs = le_chunk_begin(&b, "OBJS");
+    put(&b, "LFIL", 4);
+    u32(&b, 260);
+    put(&b, "box", 3);
+    fill(&b, 0, 257);
+    le_chunk_end(&b, objs);
+    size_t flas = le_chunk_begin(&b, "FLAS");
+    static const int32_t dremora[13] = { 3, 0, 0, 0, 77, 0, 0, 0x8000 }, loot[4] = { 10000, 19, 0, 0 },
+                         invalid[1] = { 0 }, talker[13] = { 12, 0, 0, 0, 0, 0, 13 };
+    size_t f = le_flat_begin(&b, 40, "monster1", 0, 0);
+    le_stru(&b, 106, dremora, 13);
+    le_chunk_end(&b, f);
+    f = le_flat_begin(&b, 41, "monster1", 300, 0);
+    le_chunk_end(&b, f);
+    f = le_flat_begin(&b, 42, "monster2", 600, 0);
+    le_code(&b, "ab1");
+    le_chunk_end(&b, f);
+    f = le_flat_begin(&b, 43, "monster1", 900, 0);
+    le_stru(&b, 116, loot, 4);
+    le_chunk_end(&b, f);
+    f = le_flat_begin(&b, 44, "monster1", 1200, 0);
+    le_stru(&b, 106, invalid, 1);
+    le_chunk_end(&b, f);
+    f = le_flat_begin(&b, 45, "start", 0, 500);
+    le_chunk_end(&b, f);
+    f = le_flat_begin(&b, 46, "MONSTER1", 1500, 0);
+    le_stru(&b, 106, talker, 13);
+    le_code(&b, "DS5");
+    le_chunk_end(&b, f);
+    le_chunk_end(&b, flas);
+    le_chunk_end(&b, gnrl);
+    return done(&b);
+}
+

@@ -1,9 +1,13 @@
 add_library(bs_formats STATIC
+    src/book.c
     src/bs6.c
     src/bsa.c
     src/bsi.c
+    src/creatures.c
+    src/exe_text.c
     src/flic.c
     src/font.c
+    src/items.c
     src/le.c
     src/levels.c
     src/lzss.c
@@ -12,6 +16,7 @@ add_library(bs_formats STATIC
     src/palette.c
     src/rsc.c
     src/smacker.c
+    src/spells.c
     src/wav.c)
 
 target_include_directories(bs_formats PUBLIC include)

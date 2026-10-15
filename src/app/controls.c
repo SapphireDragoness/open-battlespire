@@ -28,6 +28,7 @@ void controls_set(controls *c, bool original)
         bind(c, ACT_MOVE_DOWN, SDL_SCANCODE_PAGEDOWN, none, none);
         bind(c, ACT_SPECIAL, SDL_SCANCODE_SPACE, none, none);
         bind(c, ACT_SNEAK, SDL_SCANCODE_S, none, none);
+        bind(c, ACT_INVENTORY, SDL_SCANCODE_F10, none, none);
         bind(c, ACT_FLY, SDL_SCANCODE_F, none, none);
     } else {
         bind(c, ACT_FORWARD, SDL_SCANCODE_W, SDL_SCANCODE_UP, none);
@@ -40,9 +41,11 @@ void controls_set(controls *c, bool original)
         bind(c, ACT_DUCK, SDL_SCANCODE_C, none, none);
         bind(c, ACT_SNEAK, SDL_SCANCODE_LCTRL, SDL_SCANCODE_RCTRL, none);
         bind(c, ACT_USE, SDL_SCANCODE_E, none, none);
+        bind(c, ACT_INVENTORY, SDL_SCANCODE_I, SDL_SCANCODE_F10, none);
         bind(c, ACT_FLY, SDL_SCANCODE_F, none, none);
     }
     c->mouse[ACT_USE] = SDL_BUTTON_LMASK;
+    c->mouse[ACT_ATTACK] = SDL_BUTTON_RMASK;
 }
 
 bool controls_held(const controls *c, action a)

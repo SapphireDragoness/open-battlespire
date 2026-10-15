@@ -31,8 +31,8 @@
 #define BS_PLAYER_EYE_DUCKED 35
 
 typedef struct bs_player_stats {
-    int32_t speed;        /* the attribute at player record +0x38 (walking, jumping) */
-    int32_t attr_20;      /* the attribute at +0x20 (jumping) */
+    int32_t speed;        /* Speed, the attribute at player record +0x38 (walking, jumping) */
+    int32_t strength;     /* Strength, at +0x20 (jumping; carrying, see bs_items_move) */
     int32_t jump_skill;   /* the skill at +0x7E */
     bool deathmatch;      /* multiplayer levels move faster */
 } bs_player_stats;
@@ -43,8 +43,12 @@ typedef struct bs_player_input {
     bool jump;            /* held: charges a jump; released: jumps */
     bool duck;            /* the eye drops to 35 */
     bool sneak;           /* halves the walking speeds (the game's +0x226 bit 0x40, set by Sneak Mode) */
-    bool run;             /* the player record flag +0x199: very likely the unused "Running"
-                             spell's effect (the game has no run key); nothing sets it */
+    bool run;             /* the player record flag +0x199: the "Running" spell's effect (the game has
+                             no run key) */
+    bool jumping;         /* +0x174 bit 0x40: the "Jumping" spell's effect, a jump's forward speed x 330/256 */
+    bool slow_fall;       /* +0x173 bit 1: the "Slow Fall" spell's effect, falls at most 60 units/s */
+    float walk_speed;     /* if > 0, the forward speed in units/s instead of the one from Speed (monsters walk
+                             at their own, 0x45A2C) */
 } bs_player_input;
 
 typedef struct bs_player {
