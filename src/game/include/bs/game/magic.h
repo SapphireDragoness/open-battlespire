@@ -29,9 +29,12 @@
  *   healing, and timed effects on the player (0x295A0) with their icons.
  *   Most timed effects only work on the player.
  *
+ * Casting, a potion's spell included, counts for the school's skill
+ * (bs/game/levelling.h).
+ *
  * Not yet: Dispel Magic's list, Detect spells' displays, what Confusion does
- * to the controls, summoned monsters fighting for the player, skills rising
- * with use, multiplayer's Dispel Sigil.
+ * to the controls, summoned monsters fighting for the player, multiplayer's
+ * Dispel Sigil.
  */
 
 #define BS_MAGIC_PLAYER (-1)           /* a caster or target that is the player, not a monster */

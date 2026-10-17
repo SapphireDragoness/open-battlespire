@@ -15,6 +15,16 @@ enum {
     MSG_SPELL_POINTS_RESTORED = 247, MSG_WATER_BREATHING = 432, MSG_DRINK = 433,
 };
 
+const char *const bs_attribute_keys[8] = {"strength", "intelligence", "willpower", "agility",
+                                          "endurance", "personality", "speed", "luck"};
+/* The skill list's order (GAME.EXE's names: Medical .. Critical Strike). */
+const char *const bs_skill_keys[BS_SKILL_COUNT] = {
+    "medical",     "jumping",     "lockpicking",  "stealth",   "swimming",    "backstabbing", "dodging",
+    "running",     "destruction", "restoration",  "illusion",  "alteration",  "thaumaturgy",  "mysticism",
+    "short_blade", "long_blade",  "hand_to_hand", "axe",       "blunt_weapon", "missile",     "critical_strike",
+};
+const uint8_t bs_skill_attribute[BS_SKILL_COUNT] = {0, 6, 3, 3, 4, 3, 6, 6, 2, 5, 5, 2, 2, 5, 3, 0, 0, 0, 0, 3, 1};
+
 void bs_character_default(bs_character *c)
 {
     memset(c, 0, sizeof *c);
@@ -25,6 +35,8 @@ void bs_character_default(bs_character *c)
         c->attributes[i] = 50;
     for (int i = 0; i < BS_SKILL_COUNT; i++)
         c->skills[i] = 50;
+    memset(c->class_skills, 0xFF, sizeof c->class_skills);
+    c->magery = 0x100;
 }
 
 uint32_t bs_spell_duration(const bs_spell *s, int32_t caster_level)

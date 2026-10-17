@@ -284,6 +284,12 @@ bs_result bs_audio_play_music(bs_audio *a, const uint8_t *ogg, size_t size, bool
     return BS_OK;
 }
 
+void bs_audio_set_music_gain(bs_audio *a, float gain)
+{
+    if (a && a->music)
+        SDL_SetAudioStreamGain(a->music, gain);
+}
+
 void bs_audio_stop_music(bs_audio *a)
 {
     if (a->music)

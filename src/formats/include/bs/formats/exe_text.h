@@ -18,7 +18,10 @@ enum {
     BS_MSG_TOO_FAR = 1,             /* "You are too far away." */
     BS_MSG_OFF_BALANCE = 3,         /* "Your opponent's dodge caught you off balance." */
     BS_MSG_GREETING = 6,            /* 6-11: "The %s invites you to speak." ... */
+    BS_MSG_SKILL_INCREASED = 88,    /* "%s skill has increased..." */
     BS_MSG_NO_ARROWS = 106,         /* "You have no arrows ready." */
+    BS_MSG_ARROW_HITS = 107,        /* "Arrow hits!" */
+    BS_MSG_NO_MORE_ARROWS = 108,    /* "You have no more arrows ready." */
     BS_MSG_WEAPON_DAMAGED = 109,    /* "Your weapon is damaged." */
     BS_MSG_WEAPON_KNOCKED = 110,    /* "Your weapon is knocked from your hand!" */
     BS_MSG_TELLING_BLOW = 111,      /* "You land a telling blow." */
@@ -31,13 +34,17 @@ enum {
     BS_MSG_POTION_OF = 242,         /* "%s of %s (%d)": a potion, its spell, how many */
     BS_MSG_CANNOT_CARRY = 251,      /* "You cannot carry any more stuff." */
     BS_MSG_NOT_ALLOWED = 254,       /* "You are not allowed to equip this." */
+    BS_MSG_DESTROYED = 256,         /* "%s is destroyed..." */
+    BS_MSG_NOT_ENOUGH_POINTS = 431, /* "You do not have enough points." */
     BS_MSG_DAMAGE = 510,
     BS_MSG_CONDITION = 511,
     BS_MSG_NUMBER = 512,
     BS_MSG_WEIGHT = 519,
     BS_MSG_COMBINE = 520,           /* "You combine that item with what you already have." */
+    BS_MSG_SKILL_ABOVE = 525,       /* "Skill cannot be increased higher than your", then an attribute */
     BS_MSG_YOU_SEE = 526,           /* "You see %s." */
     BS_MSG_ATTRIBUTES = 527,        /* 527-534: the eight attribute names, strength .. luck */
+    BS_MSG_DEPENDENT_SKILL = 565,   /* "You cannot decrease this below the highest dependent skill." */
 };
 
 typedef struct bs_exe_text {

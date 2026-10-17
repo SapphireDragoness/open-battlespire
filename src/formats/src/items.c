@@ -91,6 +91,12 @@ bs_result bs_item_tables_read(const uint8_t *exe, size_t size, bs_item_tables *o
     return BS_OK;
 }
 
+const uint8_t *bs_item_base_record(const uint8_t *exe, size_t size, uint32_t base)
+{
+    const uint8_t *t = base < BS_ITEM_BASE_COUNT ? find_bases(exe, size) : NULL;
+    return t ? t + (size_t)base * BASE_SIZE : NULL;
+}
+
 bs_result bs_item_models_read(const bs_le_image *img, bs_item_tables *out)
 {
     bs_arena a;

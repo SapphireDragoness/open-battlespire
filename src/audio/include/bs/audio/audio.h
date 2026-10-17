@@ -46,6 +46,8 @@ bool bs_audio_playing(bs_audio *a, bs_voice v);
 /* Music: plays an Ogg Vorbis file from memory (which must outlive playback). */
 bs_result bs_audio_play_music(bs_audio *a, const uint8_t *ogg, size_t size, bool loop, float gain);
 void bs_audio_stop_music(bs_audio *a);
+/* Changes the playing music's gain. */
+void bs_audio_set_music_gain(bs_audio *a, float gain);
 bool bs_audio_music_playing(bs_audio *a);
 
 /* Push streams. */

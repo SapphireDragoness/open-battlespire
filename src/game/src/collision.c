@@ -179,6 +179,12 @@ void bs_collision_remove(bs_collision_world *w, uint32_t object)
         w->objects[object].present = false;
 }
 
+void bs_collision_restore(bs_collision_world *w, uint32_t object)
+{
+    if (object < w->object_count && w->objects[object].count)
+        w->objects[object].present = true;
+}
+
 /* ---- queries ---- */
 
 /* Closest point on a triangle to p (Ericson, Real-Time Collision Detection 5.1.5). */

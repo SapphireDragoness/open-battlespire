@@ -15,7 +15,7 @@ static bs_scene scene;
 static bs_bs6_level level;
 static bs_arena arena;
 static bs_collision_world world;
-static const bs_player_stats stats = {50, 50, 0, false};
+static const bs_player_stats stats = {.speed = 50, .strength = 50};
 
 static void tri(const float a[3], const float b[3], const float c[3])
 {
@@ -293,6 +293,136 @@ static void test_gaps(void)
     BS_CHECK(p.on_ground && fabsf(p.pos[1]) < 0.5f); /* fell to the floor below */
 }
 
+
+/* A pool: the floor at 0, water to 300 above it, and land (a block) from x 200 to 600 standing 320 high. */
+static void setup_pool(void)
+{
+    nv = 0;
+    static const float f0[3] = {-2000, 0, -2000}, f1[3] = {2000, 0, -2000}, f2[3] = {2000, 0, 2000},
+                       f3[3] = {-2000, 0, 2000};
+    quad(f0, f1, f2, f3);
+    box(200, -400, 600, 400, -320);
+    batch = (bs_scene_batch){0, 0, nv, -1};
+    scene = (bs_scene){.vertices = verts, .vertex_count = nv, .batches = &batch, .batch_count = 1,
+                       .static_batch_count = 1};
+    level = (bs_bs6_level){0};
+    bs_arena_free(&arena);
+    bs_arena_init(&arena, 0);
+    BS_CHECK_EQ_INT(bs_collision_build(&scene, &level, &arena, &world), BS_OK);
+}
+
+/* Falling into water stops 50 below the surface with a splash; then nothing falls. Page Down sinks and Page Up
+ * rises at 100 units/s, back to the surface; carrying too much sinks to near the bottom. */
+static void test_swim_float(void)
+{
+    setup_pool();
+    bs_player p;
+    bs_player_init(&p, (const float[3]){-1000, -600, 0}, 0);
+    bs_player_input in = {.water = true, .water_y = -300};
+    bs_player_events ev;
+    bool splashed = false;
+    for (int i = 0; i < 200 && !p.swimming; i++) {
+        bs_player_move(&p, &stats, &world, &in, 20, &ev);
+        splashed |= ev.splashed;
+    }
+    BS_CHECK(p.swimming && splashed && !ev.landed);
+    BS_CHECK(fabsf(p.pos[1] + 250) < 0.01f && p.vy == 0);
+    run(&p, &in, 100, &ev);
+    BS_CHECK(fabsf(p.pos[1] + 250) < 0.01f && p.swimming);
+    in.down = true;
+    run(&p, &in, 50, &ev);
+    BS_CHECK(fabsf(p.pos[1] + 150) < 0.5f);
+    in.down = false;
+    in.up = true;
+    run(&p, &in, 100, &ev);
+    BS_CHECK(p.pos[1] > -256 && p.pos[1] < -244);
+    in.up = false;
+    in.heavy = true;
+    run(&p, &in, 400, &ev);
+    /* It stops where the sphere at the feet (radius 16) meets the bottom, as the game's does (0x2C770). */
+    BS_CHECK(fabsf(p.pos[1] + 16) < 2);
+    /* Level 5 stops sinking 256 below the surface. */
+    bs_player_init(&p, (const float[3]){-1000, -260, 0}, 0);
+    in.dive_max = 256;
+    run(&p, &in, 400, &ev);
+    BS_CHECK(p.pos[1] > -46 && p.pos[1] < -40 && !p.on_ground);
+}
+
+/* Swimming forward: half the walking speed, plus half the Swimming skill per frame of 50 ms (and per 15-unit
+ * step of it): 140 units/s with skill 5, 1080 with 50. */
+static void test_swim_speed(void)
+{
+    setup_pool();
+    bs_player_input in = {.water = true, .water_y = -300};
+    bs_player_events ev;
+    const int32_t skill[2] = {5, 50};
+    const float speed[2] = {140, 1080};
+    for (int k = 0; k < 2; k++) {
+        bs_player_stats st = stats;
+        st.swim_skill = skill[k];
+        bs_player p;
+        bs_player_init(&p, (const float[3]){-1500, -250, 0}, 3.14159265f);
+        bs_player_move(&p, &st, &world, &in, 20, &ev);
+        BS_CHECK(p.swimming);
+        in.forward = 1;
+        float z0 = p.pos[2];
+        for (int i = 0; i < 50; i++)
+            bs_player_move(&p, &st, &world, &in, 20, &ev);
+        BS_CHECK(fabsf(z0 - p.pos[2] - speed[k]) < 3);
+        in.forward = 0;
+    }
+}
+
+/* Swimming into land 70 above the feet climbs out onto it (tried 35 further on, the floor found from 110 above). */
+static void test_swim_climb(void)
+{
+    setup_pool();
+    bs_player p;
+    bs_player_init(&p, (const float[3]){0, -250, 0}, 3.14159265f / 2); /* facing +x */
+    bs_player_input in = {.water = true, .water_y = -300};
+    bs_player_events ev;
+    run(&p, &in, 1, &ev);
+    BS_CHECK(p.swimming);
+    in.forward = 1;
+    run(&p, &in, 100, &ev);
+    BS_CHECK(!p.swimming && p.on_ground && fabsf(p.pos[1] + 320) < 0.5f && p.pos[0] > 200);
+}
+
+/* A boat goes the way it heads at walking speed, doesn't fall, and stops where its spheres touch the wall. */
+static void test_boat(void)
+{
+    setup();
+    bs_player p;
+    bs_player_init(&p, (const float[3]){-500, -150, 0}, 0);
+    bs_player_input in = {.ride = BS_RIDE_BOAT, .ride_heading = 3.14159265f / 2, .forward = 1, .strafe = 1};
+    bs_player_events ev;
+    run(&p, &in, 50, &ev);
+    BS_CHECK(fabsf(p.pos[0] + 500 - 213) < 2 && fabsf(p.pos[2]) < 0.01f && fabsf(p.pos[1] + 150) < 0.01f);
+    BS_CHECK(!ev.ride_blocked);
+    run(&p, &in, 200, &ev);
+    BS_CHECK(ev.ride_blocked && p.pos[0] < 100 - 90 - 35 + 0.01f && p.pos[0] > 100 - 90 - 35 - 5);
+}
+
+/* The balloon rises and sinks at 160 units/s, at half the walking speed, until its basket meets the floor. */
+static void test_balloon(void)
+{
+    setup();
+    bs_player p;
+    bs_player_init(&p, (const float[3]){-1500, -500, 0}, 0);
+    bs_player_input in = {.ride = BS_RIDE_BALLOON, .up = true};
+    bs_player_events ev;
+    run(&p, &in, 50, &ev);
+    BS_CHECK(fabsf(p.pos[1] + 660) < 0.5f);
+    in.up = false;
+    in.forward = 1;
+    run(&p, &in, 50, &ev);
+    BS_CHECK(fabsf(p.pos[2] - 106) < 2 && fabsf(p.pos[1] + 660) < 0.5f);
+    in.forward = 0;
+    in.down = true;
+    run(&p, &in, 300, &ev);
+    BS_CHECK(ev.ride_blocked && p.pos[1] > -4 && p.pos[1] <= 0);
+}
+
 int main(void)
 {
     bs_arena_init(&arena, 0);
@@ -307,6 +437,11 @@ int main(void)
     BS_RUN(test_charged_jump);
     BS_RUN(test_side_and_back);
     BS_RUN(test_gaps);
+    BS_RUN(test_swim_float);
+    BS_RUN(test_swim_speed);
+    BS_RUN(test_swim_climb);
+    BS_RUN(test_boat);
+    BS_RUN(test_balloon);
     bs_arena_free(&arena);
     return BS_TEST_RESULT();
 }

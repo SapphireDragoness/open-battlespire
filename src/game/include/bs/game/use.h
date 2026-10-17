@@ -21,6 +21,7 @@ enum {
     BS_SKILL_DESTRUCTION = 8,          /* the schools of magic: 8-13 */
     BS_SKILL_DODGING = 6,              /* +0xBA: lowers the chance to be hit (0x42805) */
     BS_SKILL_HAND_TO_HAND = 16,        /* +0x132 */
+    BS_SKILL_MISSILE = 19,             /* +0x156: bows, the crossbow, javelins and slings */
     BS_SKILL_CRITICAL = 20,            /* +0x162: the chance of a critical blow (0x428C6) */
 };
 
@@ -62,6 +63,14 @@ enum {
 /* The spell pools (+0x2A4, +0x2A8, +0x2AC): spells costing no more are resisted, absorbed or reflected. */
 enum { BS_POOL_RESIST, BS_POOL_ABSORB, BS_POOL_REFLECT };
 
+/* Names for the attributes and skills in files people edit (saves): "strength" .. "luck", "medical" ..
+ * "critical_strike", in the record's order. */
+extern const char *const bs_attribute_keys[8];
+extern const char *const bs_skill_keys[BS_SKILL_COUNT];
+
+/* The attribute each skill goes with (0xE8B39): it may not rise above it. */
+extern const uint8_t bs_skill_attribute[BS_SKILL_COUNT];
+
 #define BS_HOTKEYS 8
 
 typedef struct bs_character {
@@ -69,7 +78,9 @@ typedef struct bs_character {
                                           Strength, Intelligence, Willpower, Agility, Endurance, Personality,
                                           Speed, Luck */
     int32_t bonus[8];                  /* what effects add (made every frame, 0x2948C) */
-    int32_t skills[BS_SKILL_COUNT];    /* +0x72 */
+    int32_t skills[BS_SKILL_COUNT];    /* +0x7A, their base values (the game copies them to +0x72 every frame) */
+    int32_t skill_uses[BS_SKILL_COUNT];  /* +0x76: uses counted towards the next rise (bs/game/levelling.h) */
+    int32_t points;                    /* +0x20A: level-up points not spent */
     int32_t level;                     /* +0x176 */
     int32_t health, health_max;        /* +0x66, +0x6A */
     int32_t spell_points, spell_points_max;   /* +0x60, +0x62 */
@@ -90,10 +101,15 @@ typedef struct bs_character {
     bool has_anchor;                   /* the Teleport spell's anchor (+0x2B0) */
     float anchor[3];
     uint32_t water_breathing_until;    /* +0x2C0 */
+    /* The class (character creation). */
+    char class_name[24];               /* +0x17A */
+    uint8_t class_skills[12];          /* +0x1A6: primary, major, minor; 0xFF none */
+    int32_t magery;                    /* +0x19A: spell points per Intelligence, x 256 */
+    bool acute_hearing, regenerate_health, regenerate_sp, athleticism, adrenaline_rush;  /* not used in play yet */
 } bs_character;
 
-/* A character until there is character creation: level 1, 50 health, 50 spell points, every attribute and
- * skill 50. */
+/* The character without one made (--level): level 1, 50 health, 50 spell points, every attribute and skill
+ * 50, no class skills. */
 void bs_character_default(bs_character *c);
 
 /* An attribute with the effects', at least 10 (0x292CB). */

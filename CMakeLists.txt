@@ -45,6 +45,7 @@ endif()
 
 if(BS_BUILD_TOOLS)
     add_subdirectory(src/tools/bstool)
+    add_subdirectory(src/tools/bssave)
 endif()
 
 if(BS_BUILD_TESTS OR BS_FUZZ)

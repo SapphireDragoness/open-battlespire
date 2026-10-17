@@ -155,6 +155,10 @@ typedef struct bs_monster_world {
     uint32_t now_ms;
     const bs_spell *spells;                             /* the spell table (BS_SPELL_COUNT); NULL: no casting */
     uint32_t player_flags;                              /* the player's BS_FLAG_* (invisible, reflecting) */
+    bool player_can_talk;                               /* nothing in the way of a conversation: no swing
+                                                           under way, no screen open (0x495C4) */
+    bool water;                                         /* the level's water: monsters float in it too */
+    float water_y;                                      /* (0x3FB10) */
 } bs_monster_world;
 
 typedef enum bs_monster_event_kind {
@@ -163,6 +167,7 @@ typedef enum bs_monster_event_kind {
     BS_MONSTER_GREET,      /* message: BS_MSG_GREETING + n, with the creature's name */
     BS_MONSTER_GONE,       /* the death image finished: drop the loot here */
     BS_MONSTER_CAST,       /* value: spell | element << 8 | delivery << 16, at the player (paid for) */
+    BS_MONSTER_TALK,       /* the greeting starts a conversation */
 } bs_monster_event_kind;
 
 typedef struct bs_monster_event {

@@ -14,6 +14,9 @@ with Clang and AddressSanitizer + UBSan.
 | `levels` | LEVELS.TXT parsing |
 | `cdimage` | CD sector detection, volume descriptor, directory walking, file reads; cue sheet parsing |
 | `le` | LE executable loading: object table, page map, fixups |
+| `save` | saved games' record trees, controllers and SAVEVARS.DAT; class files; importing a tree |
+| `talk` | dialogue tables, and a conversation run on them |
+| `game_save` | our saved games' text (and the sectioned text reader under it): what reads must write and read again |
 
 ```sh
 cmake --preset fuzz && cmake --build --preset fuzz

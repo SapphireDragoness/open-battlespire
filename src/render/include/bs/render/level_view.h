@@ -26,7 +26,12 @@ typedef struct bs_level_view {
     uint32_t extra_first;       /* renderer object of the first extra model (bs_level_view_load_ex), or UINT32_MAX */
     uint32_t extra_count;
     bool loaded;
+    bool water;                 /* LEVELS.TXT mode[1] 'Y': water at water_y (the game's 0x16C23C) */
+    float water_y;
 } bs_level_view;
+
+/* The full-fog colour of a HAZE table, HAZE.<suffix> ("555", "666" ...). */
+bool bs_level_view_haze_color(bs_level_view *v, const bs_vfs *vfs, const char *suffix, float out[3]);
 
 /*
  * Loads file (e.g. "l1.bs6") and sets the fog, ambient light and fog colour in

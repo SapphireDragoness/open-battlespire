@@ -396,6 +396,56 @@ bs_result bs_items_add_level(bs_items *it, const bs_bs6_level *level, const bs_i
     return BS_OK;
 }
 
+bs_result bs_items_level_containers(bs_items *it, const bs_bs6_level *level)
+{
+    uint32_t *containers = calloc(level->object_count + 1, sizeof *containers);
+    if (!containers)
+        return BS_ERR_NOMEM;
+    uint32_t ncont = 0;
+    bs_arena tmp;
+    bs_arena_init(&tmp, 0);
+    for (uint32_t i = 0; i < level->object_count; i++) {
+        bs_bs6_logic lg;
+        bs_arena_mark mark = bs_arena_get_mark(&tmp);
+        if (bs_bs6_entity_logic(&level->objects[i].chunk, &tmp, &lg) == BS_OK) {
+            bool container = false;
+            for (uint32_t p = 0; p < lg.prop_count; p++)
+                container = container || lg.props[p].id == BS_BS6_PROP_CONTENTS;
+            if (container)
+                containers[ncont++] = i;
+        }
+        bs_arena_rewind(&tmp, mark);
+    }
+    bs_arena_free(&tmp);
+    free(it->containers);
+    it->containers = containers;
+    it->container_count = ncont;
+    return BS_OK;
+}
+
+uint32_t bs_items_drop_held(bs_items *it, uint32_t monster, const float pos[3])
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < it->count; i++) {
+        bs_world_item *w = &it->items[i];
+        if (w->place.where != BS_ITEM_HELD || w->place.ref != monster)
+            continue;
+        w->place = (bs_item_place){BS_ITEM_FLOOR, bs_items_cell(it->grid_cell, pos)};
+        w->object = -1;
+        memcpy(w->pos, pos, sizeof w->pos);
+        w->equipped = w->secondary = false;
+        n++;
+    }
+    return n;
+}
+
+void bs_items_forget_held(bs_items *it)
+{
+    for (uint32_t i = 0; i < it->count; i++)
+        if (it->items[i].place.where == BS_ITEM_HELD)
+            it->items[i].place.where = BS_ITEM_GONE;
+}
+
 /* The place an item is ultimately in: up through the containers holding it. */
 static bs_item_place root_place(const bs_items *it, bs_item_place p)
 {
@@ -777,6 +827,57 @@ bs_equip bs_items_set_secondary(bs_items *it, const bs_item_db *db, uint32_t i, 
     it->items[i].secondary = true;
     it->items[i].equipped = false;
     return BS_EQUIP_OK;
+}
+
+void bs_items_switch_weapons(bs_items *it)
+{
+    uint32_t w = bs_items_weapon(it), s = bs_items_secondary(it);
+    if (w != UINT32_MAX) {
+        it->items[w].equipped = false;
+        it->items[w].secondary = true;
+    }
+    if (s != UINT32_MAX) {
+        it->items[s].secondary = false;
+        it->items[s].equipped = true;
+    }
+}
+
+bool bs_item_indestructible(const bs_item *x)
+{
+    /* The items anyone may equip (0x5459A). */
+    for (int k = 0; k < 13; k++)
+        if (x->base == always_equip[k][0] && x->magic == always_equip[k][1])
+            return true;
+    return false;
+}
+
+bool bs_items_wear(bs_items *it, uint32_t i, int32_t amount)
+{
+    if (i >= it->count || it->items[i].place.where == BS_ITEM_GONE || bs_item_indestructible(&it->items[i].item))
+        return false;
+    bs_item *x = &it->items[i].item;
+    x->condition -= amount;
+    if (x->condition > 0)
+        return false;
+    it->items[i].place.where = BS_ITEM_GONE;
+    it->items[i].equipped = false;
+    it->items[i].secondary = false;
+    return true;
+}
+
+bool bs_items_take_arrow(bs_items *it, bs_item *out)
+{
+    uint32_t a = bs_items_arrows(it);
+    if (a == UINT32_MAX)
+        return false;
+    bs_world_item *w = &it->items[a];
+    *out = w->item;
+    out->quantity = 1;
+    if (--w->item.quantity <= 0) {
+        w->place.where = BS_ITEM_GONE;
+        w->equipped = false;
+    }
+    return true;
 }
 
 bool bs_items_check_bow(bs_items *it)

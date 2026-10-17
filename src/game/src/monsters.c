@@ -558,7 +558,8 @@ static bool walk(bs_monsters *ms, const bs_monster_world *w, bs_monster *m, int3
     bool was_on_ground = m->body.on_ground;
     m->body.yaw = (float)angle * 2.0f * 3.14159265f / 2048.0f;
     bs_player_stats stats = {.speed = m->attributes[6], .strength = m->attributes[0]};
-    bs_player_input in = {.forward = speed > 0 ? 1.0f : 0.0f, .walk_speed = speed};
+    bs_player_input in = {.forward = speed > 0 ? 1.0f : 0.0f, .walk_speed = speed, .water = w->water,
+                          .water_y = w->water_y};
     bs_player_events pev;
     bs_player_move(&m->body, &stats, w->collision, &in, dt_ms, &pev);
     if (was_on_ground && !m->body.on_ground) {
@@ -691,10 +692,14 @@ static void greet(bs_monster *m, const bs_monster_world *w, uint32_t i, bs_monst
         return;
     int32_t to = bs_angle_to(w->player->pos[0], w->player->pos[2], m->body.pos[0], m->body.pos[2]);
     int32_t facing = (int32_t)(w->player->yaw * 2048.0f / (2.0f * 3.14159265f)) & 0x7FF, sign;
-    if (angle_diff(facing, to, &sign) > 200 || !in_sight(w, m))
+    if (angle_diff(facing, to, &sign) > 200 || !in_sight(w, m) || !w->player_can_talk)
         return;
+    /* Half the time it talks, else one of seven greetings; once either way. */
     m->greeted = true;
-    emit(ev, BS_MONSTER_GREET, i, BS_MSG_GREETING + bs_rng_range(w->rng, 0, 6));
+    if (bs_rng_range(w->rng, 1, 100) < 50)
+        emit(ev, BS_MONSTER_TALK, i, 0);
+    else
+        emit(ev, BS_MONSTER_GREET, i, BS_MSG_GREETING + bs_rng_range(w->rng, 0, 6));
 }
 
 /* Whether a monster may cast (0x4424A): it has spells and spell points, sees its target, and hasn't given up. */
@@ -1040,9 +1045,9 @@ void bs_monsters_update(bs_monsters *ms, const bs_monster_world *w, uint32_t dt_
         if (!m->active) {
             /* Not thinking, but still standing on the floor. */
             bs_player_stats stats = {.speed = m->attributes[6]};
-            bs_player_input in = {0};
+            bs_player_input in = {.water = w->water, .water_y = w->water_y};
             bs_player_events pev;
-            if (!m->body.on_ground)
+            if (!m->body.on_ground && !m->body.swimming)
                 bs_player_move(&m->body, &stats, w->collision, &in, dt_ms, &pev);
             continue;
         }

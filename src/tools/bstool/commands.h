@@ -38,6 +38,7 @@ int cmd_flc(int argc, char **argv);
 int cmd_fnt(int argc, char **argv);
 int cmd_model(int argc, char **argv);
 int cmd_level(int argc, char **argv);
+int cmd_save(int argc, char **argv);
 
 /* Install directory from -d, else BS_DATA_DIR; NULL if neither is set. */
 const char *bstool_data_dir(void);

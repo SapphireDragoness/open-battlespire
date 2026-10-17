@@ -10,11 +10,13 @@
 #include "bs/formats/exe_text.h"
 #include "bs/formats/levels.h"
 #include "bs/formats/nodes.h"
+#include "bs/game/arrows.h"
 #include "bs/game/combat.h"
 #include "bs/game/hand.h"
 #include "bs/game/items.h"
 #include "bs/game/magic.h"
 #include "bs/game/monsters.h"
+#include "bs/game/save_import.h"
 #include "bs/game/use.h"
 #include "bs/render/level_renderer.h"
 #include "bs/render/overlay.h"
@@ -31,6 +33,12 @@
  *   monster within 90 units and 200 angle units of the facing, in sight
  *   (0x4975B). Bare hands punch: the punch0.bsi sprite, the blow after its
  *   fifth frame (0x2A892).
+ * - A bow shoots on a press of the attack button with the bow at rest: an
+ *   arrow from the arrows ready flies (bs/game/arrows.h); when the last is
+ *   gone the secondary weapon comes to hand. A wall right ahead pulls the
+ *   weapon back (or turns the bow aside).
+ * - The secondary weapon swaps with the one in hand (the A key, 0x48BE6):
+ *   the one in hand is lowered first, unless the secondary is a bow.
  * - A monster's blow is rolled when its attack animation reaches frame 4.
  * - A dead monster drops its loot (its spawn point's STRU 116) where it fell.
  * - The player dies at 0 health: 2 s later the captivity ending plays.
@@ -38,8 +46,7 @@
  *   keys and potions, the monsters' at the player; their missiles and bursts
  *   drawn as sprites; the casting hand and the effects' icons over the view.
  *
- * Not yet: arrows (a bow is only drawn and loosed), shoving, switching to the
- * secondary weapon.
+ * Not yet: shoving; weapons wearing out in melee.
  */
 
 typedef struct fight_env {
@@ -63,9 +70,15 @@ typedef struct fight_env {
     bool multiplayer;
     int32_t active_distance;
     int32_t grid_cell;
+    bool water;                      /* the level's water surface (0x16C23C), for monsters */
+    float water_y;
     void (*message)(void *ctx, const char *text);
     void *ctx;
 } fight_env;
+
+#define FIGHT_STUCK 64
+#define FIGHT_MODEL_ARROW (BS_ITEM_LAST_WEAPON + 1)   /* earrow.3d, after the weapons in hand */
+#define FIGHT_MODELS (BS_ARROWS + 2)                  /* at most: the weapon, its arrow, those in flight */
 
 typedef struct fight {
     bs_creature_tables tables;
@@ -95,6 +108,17 @@ typedef struct fight {
     const bs_bsi_image *sparkle;                            /* twinkle.bsi */
     const bs_bsi_image *hands[BS_ELEMENT_COUNT];            /* cast00-04 */
     const bs_bsi_image *icons[27];                          /* symb00-26 */
+    /* Arrows. */
+    bs_arrows arrows;
+    struct {
+        uint32_t monster;
+        bs_item item;
+    } stuck[FIGHT_STUCK];                                   /* arrows in monsters, dropped with them */
+    uint32_t stuck_count;
+    bool attack_was_held;
+    bool press_used;                 /* the press sent a spell: the bow doesn't shoot with it */
+    bs_hand_input last_input;
+    uint32_t talk_to;                /* a monster whose greeting starts a conversation, or UINT32_MAX */
 } fight;
 
 /* Reads the creature tables from GAME.EXE's bytes. */
@@ -134,8 +158,31 @@ bool fight_draw_hud(fight *f, const fight_env *env, bs_overlay *o);
 /* One frame. Returns true if items were dropped (the world's items changed). */
 bool fight_update(fight *f, const fight_env *env, bool attack_held, uint32_t dt_ms);
 
-/* The weapon in hand's placement in the level (0x49303) and its base item (0..14), or false with none. */
-bool fight_hand(const fight *f, const fight_env *env, bs_scene_xform *out, int *weapon);
+/* The A key (0x48BE6): the secondary weapon to hand. */
+void fight_switch_weapon(fight *f, const fight_env *env);
+
+/* The 3D models to draw with the level: the weapon in hand (0x49303) or bow (0x49F7E), its nocked arrow,
+ * the arrows in flight. model[] gets the base item (0..14) or FIGHT_MODEL_ARROW. Returns how many (at
+ * most FIGHT_MODELS); the first *in_hand are held, and drawn over the level. */
+/* The monster nearest along the view, not dead, before any wall within max units, or UINT32_MAX; *distance
+ * its distance (for using it: within 384 it talks, 0x4D005). */
+uint32_t fight_monster_ahead(const fight *f, const fight_env *env, float max, float *distance);
+
+/* The monsters a save left, instead of those spawned (fight_enter_level first). What monster i of the list
+ * holds (BS_ITEM_HELD, ref i) goes with it; with monsters off it lies where it stood. */
+void fight_restore(fight *f, const fight_env *env, const bs_saved_monster *list, uint32_t count);
+
+/* n monsters of a creature by a point (the dialogue's SUMMON and MONSTERRALLY, 0x5A615). */
+void fight_summon_at(fight *f, const fight_env *env, uint32_t type, const float pos[3], int count);
+
+/* Puts a monster in an AI state (the dialogue's MONSTERATTACK, COMMAND ...: +0x26F). */
+void fight_monster_state(fight *f, uint32_t i, int state);
+
+/* Whether nothing stands in the way of talking (0x495C4): no weapon, or one at rest, walking, recovering, or
+ * held back by a wall. */
+bool fight_can_talk(const fight *f, const fight_env *env);
+
+uint32_t fight_models(const fight *f, const fight_env *env, bs_scene_xform *out, int *model, uint32_t *in_hand);
 
 /* Hands the monsters', missiles' and bursts' sprites, as seen from eye, to the renderer. */
 void fight_draw(fight *f, const float eye[3], uint32_t now_ms, bs_level_renderer *r);

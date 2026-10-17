@@ -100,7 +100,21 @@ uint32_t inventory_models(const bs_item_tables *t, char names[INVENTORY_MODELS][
 /* The model object of an item, or UINT32_MAX. */
 uint32_t inventory_item_object(const inventory_env *env, uint32_t item);
 
+/* An item's model spinning in a rectangle of the 640x480 screen (0x51030), as the lists show them. */
+void inventory_draw_model(const inventory_env *env, const bs_item *it, int x0, int y0, int x1, int y1, int ww, int wh,
+                          uint64_t ms);
+
+/* An item's two lines as the screen shows the selected one's (0x4F37D). */
+void inventory_item_lines(const inventory_env *env, const bs_item *it, char *l1, char *l2, size_t cap);
+
 void inventory_init(inventory *inv);
+
+/* The paper doll's images, bottom first, without its frame (0x56510): the body, eyes, mouth, hair (not
+ * under a helmet) and the worn items' pictures. Returns how many (at most max); the body is first. */
+int inventory_doll_images(const inventory_env *env, const bs_bsi_image **out, int max);
+
+/* The doll's eyes image, whose placement the bar's face is cut out around. */
+const bs_bsi_image *inventory_doll_eyes(const inventory_env *env);
 
 /* Opens with the carried items on the left and `other` on the right. */
 void inventory_open(inventory *inv, const inventory_env *env, bs_item_place other);

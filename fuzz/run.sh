@@ -2,7 +2,7 @@
 # Runs one libFuzzer harness.
 #
 #   fuzz/run.sh <target> [seconds] [extra libFuzzer args...]
-#   targets: lzss bsa bsi flic font rsc levels cdimage le model bs6 wav smk nodes magic book
+#   targets: lzss bsa bsi flic font rsc levels cdimage le model bs6 wav smk nodes magic book save talk game_save
 #
 # Build first:  cmake --preset fuzz && cmake --build --preset fuzz
 #
@@ -61,6 +61,15 @@ if [ -n "${BS_DATA_DIR:-}" ] && [ ! -d "$real" ]; then
             "$bstool" smk -o "$real" --cut 2 ANCHORS.SMK CHOP2.SMK STORY.SMK >/dev/null
             rm -f "$real"/*.wav ;;
         nodes)  cp "$BS_DATA_DIR/GAMEDATA/NODES.M2" "$BS_DATA_DIR/GAMEDATA/nodes.m5" "$real/" ;;
+        talk)   "$bstool" extract GAMEDATA/TXT.BSA -o "$real" SK1T.TXT SK1M.TXT CV1T.TXT DM1F.TXT >/dev/null ;;
+        save)
+            # Class files (the same records), and any saved games' trees and variables.
+            cp "$BS_DATA_DIR/GAMEDATA/CLASS000.SCL" "$BS_DATA_DIR/GAMEDATA/CLASS015.SCL" "$real/"
+            for d in "$BS_DATA_DIR"/SAVE?; do
+                for f in "$d"/SAVETREE.DAT "$d"/SAVEVARS.DAT; do
+                    [ -f "$f" ] && cp "$f" "$real/$(basename "$d")_$(basename "$f")"
+                done
+            done ;;
         *) ;;
     esac
 fi

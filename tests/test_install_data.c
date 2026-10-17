@@ -11,11 +11,20 @@
 #include "bs/assets/assets.h"
 #include "bs/assets/scene.h"
 #include "bs/core/install.h"
+#include "bs/formats/automap.h"
+#include "bs/formats/save.h"
+#include "bs/formats/scl.h"
 #include "bs/formats/bs6.h"
 #include "bs/formats/items.h"
+#include "bs/game/creation.h"
+#include "bs/game/dialogue.h"
+#include "bs/formats/talk.h"
 #include "bs/game/items.h"
 #include "bs/game/level_logic.h"
 #include "bs/game/player.h"
+#include "bs/game/game_save.h"
+#include "bs/game/save_edit.h"
+#include "bs/game/save_import.h"
 #include "bs/formats/bsa.h"
 #include "bs/formats/creatures.h"
 #include "bs/game/monsters.h"
@@ -510,7 +519,7 @@ static void test_player_level1(void)
                 start[c] = (float)lvl.flats[i].pos[c];
     bs_player p;
     bs_player_init(&p, start, 0);
-    static const bs_player_stats stats = {50, 50, 0, false};
+    static const bs_player_stats stats = {.speed = 50, .strength = 50};
     bs_player_input in = {0};
     bs_player_events ev;
     for (int i = 0; i < 100; i++)
@@ -714,6 +723,35 @@ static void test_items(void)
     BS_CHECK(strcmp(tables.hand_models[1], "eloswrd.3d") == 0 && strcmp(tables.hand_models[9], "ebow.3d") == 0);
     for (uint32_t b = 0; b <= BS_ITEM_LAST_WEAPON; b++)
         BS_CHECK(bs_assets_model(assets, tables.hand_models[b]) != NULL);
+    BS_CHECK(bs_assets_model(assets, "earrow.3d") != NULL); /* an arrow in flight (0x48A26) */
+    /* The automap's table (0xF1083): every map picture exists; level 3 has two. */
+    static bs_automap_table maps;
+    BS_CHECK_EQ_INT(bs_automap_table_read(data, n, &maps), BS_OK);
+    BS_CHECK_EQ_INT(maps.count, BS_AUTOMAP_MAPS);
+    BS_CHECK(strcmp(maps.maps[0].image, "map000.bsi") == 0 && strcmp(maps.maps[28].level, "yaga.bs6") == 0);
+    BS_CHECK(maps.maps[0].world[0] == -5921 && maps.maps[0].screen[3] == 468 && maps.maps[0].shift[1] == -1);
+    BS_CHECK_EQ_INT(bs_automap_find(&maps, "L1.BS6", 0), 0);
+    BS_CHECK_EQ_INT(bs_automap_find(&maps, "l3.bs6", 0), 2);
+    BS_CHECK_EQ_INT(bs_automap_find(&maps, "l3.bs6", 800), 3);
+    BS_CHECK_EQ_INT(bs_automap_find(&maps, "l7.bs6", 0), -1);
+    for (uint32_t i = 0; i < maps.count; i++)
+        BS_CHECK(bs_assets_image(assets, maps.maps[i].image) != NULL);
+    /* The character sheet's skill names (0xE34E9) and attributes' short names (0xE8B15). */
+    bs_exe_text names;
+    BS_CHECK_EQ_INT(bs_exe_string_table(&img, "Medical", 21, &a, &names), BS_OK);
+    BS_CHECK(names.count >= 21 && strcmp(names.messages[20], "Critical Strike") == 0);
+    BS_CHECK_EQ_INT(bs_exe_string_table(&img, "STR", 8, &a, &names), BS_OK);
+    BS_CHECK(names.count >= 8 && strcmp(names.messages[7], "LCK") == 0);
+    /* The screens' pictures. */
+    static const char *const screens[] = {"cscr00.bsi", "map030.bsi", "options.bsi", "optnon00.bsi", "optn07.bsi",
+                                          "optn08.bsi", "sure00.bsi", "hyes00.bsi", "hno000.bsi"};
+    for (size_t i = 0; i < sizeof screens / sizeof *screens; i++)
+        BS_CHECK(bs_assets_image(assets, screens[i]) != NULL);
+    for (int i = 0; i <= 22; i++) {
+        char hn[16];
+        snprintf(hn, sizeof hn, "help%02d.bsi", i);
+        BS_CHECK(bs_assets_image(assets, hn) != NULL);
+    }
     for (int32_t sg = 9001; sg <= 9052; sg++)
         BS_CHECK(bs_assets_model(assets, bs_item_model_name(&tables, BS_ITEM_SIGIL_AMULET, sg, mbuf)) != NULL);
 
@@ -834,6 +872,365 @@ static void test_items(void)
  * Every sound effect and voice clip is an 8-bit mono PCM WAV. Voices are all
  * 11025 Hz; effects use 11025 Hz (280), 32000 Hz (89) or 8114 Hz (1).
  */
+/* The 18 classes (GAMEDATA/CLASSnnn.SCL): each reads, with twelve class skills and its spells and items. */
+/* What a class cost, made again from a new one with bs_creation. */
+static int32_t class_cost(const bs_class *k)
+{
+    static bs_creation c;
+    bs_creation_new(&c);
+    c.points += 1000000;
+    int32_t start = c.points + 300;
+    for (int a = 0; a < 8; a++)
+        while (c.cls.attributes[a] != k->attributes[a])
+            if (bs_creation_attribute(&c, a, c.cls.attributes[a] < k->attributes[a]) != BS_CREATE_OK)
+                return -1;
+    while (c.cls.wounds < k->wounds)
+        bs_creation_wounds(&c, true);
+    for (int s = 0; s < BS_SCL_CLASS_SKILLS; s++) {
+        if (!bs_creation_set_skill(&c, s, k->class_skills[s]))
+            return -1;
+        int32_t *v = &c.cls.skills[k->class_skills[s]];
+        while (*v != k->skills[k->class_skills[s]])
+            if (bs_creation_skill(&c, s, *v < k->skills[k->class_skills[s]]) != BS_CREATE_OK)
+                return -1;
+    }
+    while (c.cls.magery < k->magery)
+        bs_creation_magery(&c, true);
+    for (int e = 0; e < 5; e++) {
+        int bit = 1 << e;
+        if (k->resists & bit)
+            bs_creation_tolerance(&c, BS_TOL_RESISTANCE, bit);
+        if (k->immune & bit)
+            bs_creation_tolerance(&c, BS_TOL_IMMUNITY, bit);
+        if (k->low_tolerance & bit)
+            bs_creation_tolerance(&c, BS_TOL_LOW, bit);
+        if (k->critical_weakness & bit)
+            bs_creation_tolerance(&c, BS_TOL_CRITICAL, bit);
+        if (k->forbidden_weapons & bit)
+            bs_creation_forbid_weapon(&c, (uint8_t)bit);
+    }
+    const bool flags[BS_CREATION_FLAGS] = {k->acute_hearing, k->spell_absorption, k->rapid_healing,
+                                           k->regenerate_health, k->regenerate_sp, k->athleticism,
+                                           k->adrenaline_rush, k->no_sp_regen, k->forbidden_shield};
+    for (int f = 0; f < BS_CREATION_FLAGS; f++)
+        if (flags[f])
+            bs_creation_toggle(&c, (bs_creation_flag)f);
+    while (c.cls.max_armour > k->max_armour)
+        bs_creation_armour(&c, false);
+    while (c.cls.max_material > k->max_material)
+        bs_creation_material(&c, false);
+    for (uint32_t i = 0; i < k->spell_count; i++)
+        bs_creation_add_spell(&c, &k->spells[i]);
+    static bs_creation_shop equipment, magic;
+    memset(&equipment, 0, sizeof equipment);
+    memset(&magic, 0, sizeof magic);
+    magic.magic = true;
+    bs_item others[BS_SCL_MAX_ITEMS];
+    bs_creation_class_items(k, false, &equipment, &magic, others, BS_SCL_MAX_ITEMS);
+    int32_t items = 0;
+    for (uint32_t i = 0; i < equipment.count; i++)
+        items += bs_creation_shop_cost(&equipment, i);
+    for (uint32_t i = 0; i < magic.count; i++)
+        items += bs_creation_shop_cost(&magic, i);
+    return start - c.points + items;
+}
+
+static void test_classes(void)
+{
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    static bs_class c;
+    int consistent = 0;
+    for (int i = 0; i < 18; i++) {
+        char path[48];
+        snprintf(path, sizeof path, "GAMEDATA/CLASS%03d.SCL", i);
+        uint8_t *data;
+        size_t n;
+        BS_CHECK_EQ_INT(bs_vfs_read(&vfs, path, &a, &data, &n), BS_OK);
+        BS_CHECK_EQ_INT(bs_class_parse(data, n, &c), BS_OK);
+        BS_CHECK(c.class_name[0] != '\0' && c.level == 1);
+        for (int k = 0; k < BS_SCL_CLASS_SKILLS; k++)
+            BS_CHECK(c.class_skills[k] < BS_SCL_SKILLS && c.class_skills[k] != 0 && c.class_skills[k] != 2 &&
+                     c.class_skills[k] != 7);
+        BS_CHECK(c.spell_count >= 1 && c.item_count >= 1);
+        /* Seven come to 4980 with what they have left (docs/formats/scl.md). */
+        int32_t cost = class_cost(&c);
+        BS_CHECK(cost > 3000);
+        consistent += cost + c.points_left == 4980;
+        BS_CHECK(c.magery == 0x100 || c.magery == 0x180 || c.magery == 0x200 || c.magery == 0x300);
+        for (uint32_t k = 0; k < c.spell_count; k++)
+            BS_CHECK(c.spells[k].effect >= 1 && c.spells[k].effect <= BS_SPELL_COUNT);
+        for (uint32_t k = 0; k < c.item_count; k++)
+            BS_CHECK(c.items[k].base < 43 && (c.items[k].flags & 0x10));
+        if (i == 0) {
+            /* The Acrobat: Strength and Speed 60, wounds 75, Blunt Weapon 60, Athleticism, no axes, light armour. */
+            BS_CHECK(strcmp(c.class_name, "Acrobat") == 0);
+            BS_CHECK(c.attributes[0] == 60 && c.attributes[6] == 60 && c.wounds == 75 && c.skills[18] == 60);
+            BS_CHECK(c.class_skills[0] == 1 && c.class_skills[1] == 6 && c.class_skills[2] == 18);
+            BS_CHECK(c.athleticism && c.adrenaline_rush && c.forbidden_weapons == 8 && c.max_armour == 1);
+            BS_CHECK(c.spell_count == 2 && c.spells[0].effect == 21 && c.spells[1].effect == 22);
+            BS_CHECK(c.item_count == 8 && c.items[3].base == 22 && c.items[3].quantity == 25);
+        }
+    }
+    BS_CHECK_EQ_INT(consistent, 7);
+    bs_arena_free(&a);
+}
+
+/* Saved games in the install's SAVE0-9, if any (the user's own): every file reads; the player is there;
+ * parents resolve; the level's controllers take up the rest of the tree exactly, in our chain order. */
+static void test_saves(void)
+{
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    uint8_t *data;
+    size_t n;
+    bs_level_table table;
+    bs_assets *assets;
+    BS_CHECK_EQ_INT(bs_assets_open(&vfs, &assets), BS_OK);
+    BS_CHECK_EQ_INT(bs_vfs_read(&vfs, "GAMEDATA/LEVELS.TXT", &a, &data, &n), BS_OK);
+    BS_CHECK_EQ_INT(bs_levels_parse(data, n, &a, &table), BS_OK);
+    uint8_t *exe;
+    size_t exe_size;
+    static bs_automap_table maps;
+    static bs_spell spells[BS_SPELL_COUNT];
+    BS_CHECK_EQ_INT(bs_vfs_read(&vfs, "GAME.EXE", &a, &exe, &exe_size), BS_OK);
+    BS_CHECK_EQ_INT(bs_automap_table_read(exe, exe_size, &maps), BS_OK);
+    BS_CHECK_EQ_INT(bs_spells_read(exe, exe_size, spells), BS_OK);
+    int found = 0;
+    for (int slot = 0; slot < 10; slot++) {
+        char path[1024];
+        uint8_t *tree_data, *vars_data;
+        size_t tree_size, vars_size;
+        snprintf(path, sizeof path, "%s/SAVE%d/SAVETREE.DAT", data_dir, slot);
+        if (bs_fs_read_file(path, &a, &tree_data, &tree_size) != BS_OK)
+            continue;
+        snprintf(path, sizeof path, "%s/SAVE%d/SAVEVARS.DAT", data_dir, slot);
+        BS_CHECK_EQ_INT(bs_fs_read_file(path, &a, &vars_data, &vars_size), BS_OK);
+        found++;
+        bs_save_tree t;
+        static bs_save_vars v;
+        BS_CHECK_EQ_INT(bs_save_tree_parse(tree_data, tree_size, &a, &t), BS_OK);
+        BS_CHECK_EQ_INT(bs_save_vars_parse(vars_data, vars_size, &v), BS_OK);
+        BS_CHECK_EQ_INT(t.version, BS_SAVE_VERSION);
+        int32_t player = bs_save_find(&t, BS_SAVE_PLAYER_ID);
+        BS_CHECK(player >= 0 && t.records[player].type == BS_SAVE_PLAYER &&
+                 t.records[player].parent == BS_SAVE_PARENT_ROOT);
+        /* The campaign level's controller chains, in the logic's order. */
+        const bs_level_info *info = NULL;
+        for (size_t i = 0; i < table.count && !info; i++)
+            if (bs_level_game_type(&table.levels[i]) == BS_GAME_CAMPAIGN &&
+                bs_level_number(&table.levels[i]) == v.level_number)
+                info = &table.levels[i];
+        BS_CHECK(info != NULL);
+        if (!info)
+            continue;
+        bs_bs6_level lvl;
+        bs_level_logic lg;
+        BS_CHECK_EQ_INT(bs_assets_read(assets, info->file, &a, &data, &n), BS_OK);
+        BS_CHECK_EQ_INT(bs_bs6_parse(data, n, &a, &lvl), BS_OK);
+        BS_CHECK_EQ_INT(bs_level_logic_build(&lvl, &a, &lg), BS_OK);
+        uint32_t *chains = BS_ARENA_ARRAY(&a, uint32_t, lg.object_count + 1), *ids =
+            BS_ARENA_ARRAY(&a, uint32_t, lg.object_count + 1), nch = 0;
+        for (uint32_t i = 0; chains && ids && i < lg.object_count; i++)
+            if (lg.objects[i].ctrl_count) {
+                ids[nch] = lg.objects[i].entity_id;
+                chains[nch++] = lg.objects[i].ctrl_count;
+            }
+        /* Parents not saved are the level's own objects (chests), by their BS6 ids. */
+        for (uint32_t i = 0; i < t.count; i++) {
+            const bs_save_record *r = &t.records[i];
+            if (r->parent <= BS_SAVE_PARENT_LEVEL || r->parent_index >= 0 || r->reserve)
+                continue;
+            bool level_object = false;
+            for (uint32_t k = 0; k < lg.object_count && !level_object; k++)
+                level_object = lg.objects[k].entity_id == r->parent;
+            BS_CHECK(level_object);
+        }
+        /* Opened for editing and written untouched, both files come back as they were. */
+        static bs_save_edit ed;
+        BS_CHECK_EQ_INT(bs_save_edit_open(&ed, tree_data, tree_size, vars_data, vars_size), BS_OK);
+        uint8_t *again;
+        size_t again_size;
+        BS_CHECK_EQ_INT(bs_save_edit_write(&ed, &again, &again_size), BS_OK);
+        BS_CHECK(again_size == tree_size && memcmp(again, tree_data, tree_size) == 0);
+        BS_CHECK(memcmp(ed.vars, vars_data, BS_SAVE_VARS_SIZE) == 0);
+        free(again);
+        bs_save_edit_free(&ed);
+        /* Imported: every item somewhere the level has, every saved model one of the level's, the player on
+         * a cell of the automap that was seen (the grid row by row, as the engine keeps it). */
+        static bs_saved_game sg;
+        BS_CHECK_EQ_INT(bs_save_import(&t, &v, spells, &a, &sg), BS_OK);
+        BS_CHECK(sg.name[0] != '\0' && sg.character.health_max > 0 && sg.character.spells_known != 0);
+        uint32_t carried = 0;
+        for (uint32_t i = 0; i < sg.item_count; i++) {
+            const bs_saved_item *it = &sg.items[i];
+            carried += it->place == BS_SAVED_CARRIED;
+            bool known = it->place != BS_SAVED_IN_OBJECT;
+            for (uint32_t k = 0; k < lvl.object_count && !known; k++)
+                known = lvl.objects[k].id == it->ref;
+            BS_CHECK(known);
+            BS_CHECK(it->place != BS_SAVED_IN_ITEM || it->ref < sg.item_count);
+            BS_CHECK(it->place != BS_SAVED_MONSTER || it->ref < sg.monster_count);
+        }
+        BS_CHECK(carried > 0);
+        for (uint32_t i = 0; i < sg.object_count; i++) {
+            bool known = false;
+            for (uint32_t k = 0; k < lvl.object_count && !known; k++)
+                known = lvl.objects[k].id == sg.objects[i].id;
+            BS_CHECK(known);
+        }
+        for (uint32_t i = 0; i < sg.monster_count; i++)
+            BS_CHECK(sg.monsters[i].type < BS_CREATURE_COUNT && sg.monsters[i].health > 0);
+        /* As our text and back: the same game. */
+        {
+            char *text;
+            size_t text_size;
+            static bs_saved_game back;
+            char err[BS_GAME_SAVE_ERROR];
+            BS_CHECK_EQ_INT(bs_game_save_write(&sg, NULL, &text, &text_size), BS_OK);
+            BS_CHECK_EQ_INT(bs_game_save_read(text, text_size, spells, NULL, &a, &back, err), BS_OK);
+            BS_CHECK(back.item_count == sg.item_count && back.monster_count == sg.monster_count &&
+                     back.object_count == sg.object_count);
+            for (uint32_t i = 0; i < sg.item_count && i < back.item_count; i++)
+                BS_CHECK(memcmp(&back.items[i].item, &sg.items[i].item, sizeof(bs_item)) == 0 &&
+                         back.items[i].place == sg.items[i].place && back.items[i].ref == sg.items[i].ref);
+            for (uint32_t i = 0; i < sg.monster_count && i < back.monster_count; i++) {
+                /* Positions are kept to a thousandth. */
+                bs_saved_monster m = back.monsters[i];
+                for (int c = 0; c < 3; c++) {
+                    BS_CHECK(fabsf(m.pos[c] - sg.monsters[i].pos[c]) <= 0.0005f);
+                    m.pos[c] = sg.monsters[i].pos[c];
+                }
+                BS_CHECK(memcmp(&m, &sg.monsters[i], sizeof m) == 0);
+            }
+            BS_CHECK(memcmp(back.seen, sg.seen, sizeof back.seen) == 0);
+            BS_CHECK(memcmp(back.character.attributes, sg.character.attributes, sizeof back.character.attributes) == 0);
+            BS_CHECK(memcmp(back.character.skills, sg.character.skills, sizeof back.character.skills) == 0);
+            BS_CHECK_EQ_INT(back.character.spells_known, sg.character.spells_known);
+            BS_CHECK(memcmp(back.character.book, sg.character.book, sizeof back.character.book) == 0);
+            BS_CHECK_EQ_INT(back.dialogue.global_count, sg.dialogue.global_count);
+            /* Speakers' variables, by id (the game fills its table from the end; slots don't matter). */
+            for (int l = 0; l < BS_DIALOGUE_LOCALS; l++) {
+                if (!sg.dialogue.locals[l].id)
+                    continue;
+                bool same = false;
+                for (int m = 0; m < BS_DIALOGUE_LOCALS && !same; m++)
+                    same = back.dialogue.locals[m].id == sg.dialogue.locals[l].id;
+                BS_CHECK(same);
+            }
+            free(text);
+        }
+        int map = bs_automap_find(&maps, info->file, sg.pos[1]);
+        uint32_t seen = 0;
+        for (uint32_t k = 0; k < BS_SAVE_AUTOMAP_CELLS; k++)
+            seen += sg.seen[k];
+        if (map >= 0 && seen) {
+            int sx, sy;
+            bs_automap_point(&maps.maps[map], sg.pos[0], sg.pos[2], &sx, &sy);
+            BS_CHECK(sg.seen[(sy / 16) * 40 + sx / 16]);
+        }
+        bool ours = true; /* saved in this level, not one of its interiors */
+        for (uint32_t i = 0; i < t.count; i++)
+            if (t.records[i].type == BS_SAVE_OBJECT && t.records[i].link2 >= 0)
+                ours = ours && (uint32_t)t.records[i].link2 < nch && ids[t.records[i].link2] == t.records[i].id;
+        if (!ours) {
+            fprintf(stderr, "  SAVE%d: not in %s itself; controllers not checked\n", slot, info->file);
+            continue;
+        }
+        bs_save_controller *ctl;
+        uint32_t nc, na;
+        uint8_t *active;
+        BS_CHECK_EQ_INT(bs_save_controllers_read(t.controls, t.controls_size, chains, nch, &a, &ctl, &nc, &active, &na),
+                        BS_OK);
+        size_t used = 4 + na;
+        for (uint32_t i = 0; i < nc; i++)
+            used += (ctl[i].flags & 1) ? 45 : 1;
+        BS_CHECK_EQ_INT(used, t.controls_size);
+        for (uint32_t i = 0; i < na; i++)
+            BS_CHECK(active[i] < nch);
+    }
+    if (found)
+        fprintf(stderr, "  %d saved games checked\n", found);
+    bs_assets_close(assets);
+    bs_arena_free(&a);
+}
+
+/* Every conversation in TXT.BSA: it opens for both sexes on every visit, and every line it can reach
+ * through replies is in its script. */
+static void test_dialogue_tables(void)
+{
+    bs_bsa *bsa;
+    BS_CHECK_EQ_INT(bs_bsa_open_vfs(&vfs, "GAMEDATA/TXT.BSA", &bsa), BS_OK);
+    if (!bsa)
+        return;
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    const char **names = BS_ARENA_ARRAY(&a, const char *, bsa->count);
+    for (uint32_t i = 0; i < bsa->count; i++)
+        names[i] = bsa->records[i].name;
+    static bs_dialogue_state s;
+    static bs_dialogue d;
+    int stems = 0, opened = 0, messages = 0, nothing = 0, lines = 0, missing_goto = 0;
+    for (uint32_t i = 0; i < bsa->count; i++) {
+        const char *nm = names[i];
+        if (strlen(nm) != 8 || (nm[3] != 'T' && nm[3] != 't') || strcmp(nm + 4, ".TXT") != 0)
+            continue;
+        char stem[4] = {nm[0], nm[1], nm[2], 0};
+        for (int female = 0; female < 2; female++) {
+            int32_t gi, ti;
+            bs_dialogue_files(names, bsa->count, stem, female, &gi, &ti);
+            if (gi < 0 || ti < 0)
+                continue;
+            stems += !female;
+            uint8_t *data;
+            size_t n;
+            bs_talk_file group, talk;
+            BS_CHECK_EQ_INT(bs_bsa_read(bsa, &bsa->records[gi], &a, &data, &n), BS_OK);
+            BS_CHECK_EQ_INT(bs_talk_parse(data, n, &a, &group), BS_OK);
+            BS_CHECK_EQ_INT(bs_bsa_read(bsa, &bsa->records[ti], &a, &data, &n), BS_OK);
+            BS_CHECK_EQ_INT(bs_talk_parse(data, n, &a, &talk), BS_OK);
+            bs_dialogue_state_init(&s);
+            bs_dialogue_update_vars(&s, female, NULL, NULL);
+            bs_rng r = {(uint32_t)(i * 7 + (uint32_t)female + 1)};
+            for (int visit = 0; visit < 6; visit++) {
+                char msg[512];
+                bs_dialogue_opening o = bs_dialogue_start(&d, &s, &group, &talk, 1000 + i, 0, &r, msg, sizeof msg);
+                opened += o == BS_DIALOGUE_TALK;
+                messages += o == BS_DIALOGUE_MESSAGE;
+                nothing += o == BS_DIALOGUE_NOTHING;
+            }
+            /* Every line's replies lead somewhere. */
+            for (uint32_t row = 2; row < talk.count; row++) {
+                const char *code = bs_talk_cell(&talk, row, 1);
+                if (strlen(code) < 5)
+                    continue;
+                lines++;
+                d.say_row = (int32_t)row;
+                bs_dialogue_update_replies(&d);
+                for (uint32_t k = 0; k < d.reply_count; k++) {
+                    const char *to = bs_talk_cell(&talk, d.replies[k], 8);
+                    if (!to[0] || strchr(to, ':') || bs_talk_prefix(to, "end", 3))
+                        continue;
+                    if (bs_talk_find(&talk, 0, 1, to) < 0) {
+                        missing_goto++;
+                        fprintf(stderr, "  %s: %s goes to %s, which isn't there\n", nm, code, to);
+                    }
+                }
+            }
+        }
+    }
+    fprintf(stderr, "  %d stems, %d lines; %d openings, %d messages, %d with nothing; %d gotos missing\n", stems,
+            lines, opened, messages, nothing, missing_goto);
+    /* Some tables leave later visits blank or write "Random" for "GotoRandom", and two are tests (TA1, TF1):
+     * those open nothing. */
+    BS_CHECK(stems > 70);
+    BS_CHECK(opened > 550);
+    BS_CHECK(nothing < 60);
+    BS_CHECK_EQ_INT(missing_goto, 0);
+    bs_arena_free(&a);
+    bs_bsa_close(bsa);
+}
+
 static void test_all_sounds(void)
 {
     static const struct {
@@ -940,6 +1337,9 @@ int main(void)
     BS_RUN(test_all_nodes);
     BS_RUN(test_items);
     BS_RUN(test_creatures);
+    BS_RUN(test_classes);
+    BS_RUN(test_saves);
+    BS_RUN(test_dialogue_tables);
     BS_RUN(test_all_sounds);
     BS_RUN(test_all_videos);
     bs_cdimage_close(cd);

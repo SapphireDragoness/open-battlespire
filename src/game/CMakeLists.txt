@@ -1,4 +1,4 @@
-add_library(bs_game STATIC src/collision.c src/combat.c src/hand.c src/items.c src/level_logic.c src/level_script.c src/magic.c src/monsters.c src/player.c src/use.c)
+add_library(bs_game STATIC src/arrows.c src/collision.c src/creation.c src/dialogue.c src/combat.c src/game_save.c src/hand.c src/items.c src/level_logic.c src/levelling.c src/level_script.c src/magic.c src/monsters.c src/player.c src/save_edit.c src/save_import.c src/use.c)
 target_include_directories(bs_game PUBLIC include)
 target_link_libraries(bs_game PUBLIC bs_assets)
 if(NOT MSVC)

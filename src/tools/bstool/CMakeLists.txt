@@ -8,6 +8,7 @@ add_executable(bstool
     cmd_fnt.c
     cmd_info.c
     cmd_le2elf.c
+    cmd_save.c
     cmd_smk.c
     cmd_text.c
     gltf.c)

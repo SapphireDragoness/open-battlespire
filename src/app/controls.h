@@ -10,7 +10,7 @@
  * - original: the game's defaults (UESP, "Battlespire:Controls"): arrows move,
  *   Alt jumps, Delete/End turn, Insert/Home look, Page Up/Down move up and
  *   down, S sneaks, Space with the mouse pulled back ducks, the left button
- *   uses, F10 opens the inventory.
+ *   uses, F10 opens the inventory, D leaves a boat or the balloon (0xE8229).
  * - modern: W A S D and mouse look, Space jumps, C ducks, Ctrl sneaks, E or
  *   the left button uses, I or F10 opens the inventory.
  * Both keep the mouse looking around (the original's "View" mode).
@@ -27,6 +27,10 @@ typedef enum action {
     ACT_ATTACK,    /* held: moving the mouse swings the weapon (both layouts: the right button) */
     ACT_INVENTORY, /* original: F10 */
     ACT_FLY,       /* not in the original: free flight */
+    ACT_SWITCH_WEAPON, /* to the secondary weapon: original A */
+    ACT_SHEET,     /* the character sheet: F9 */
+    ACT_AUTOMAP,   /* the automap: F11 */
+    ACT_LEAVE,     /* leaves a boat or the balloon: original D (the game's action 6), modern X */
     ACT_COUNT
 } action;
 

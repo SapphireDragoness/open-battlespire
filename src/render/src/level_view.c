@@ -28,7 +28,7 @@ static void horizon_color(const bs_bsi_image *sky, float out[3])
  * fog levels x 32 input values of u32, where level 0 is full fog. See
  * docs/formats/palettes.md.
  */
-static bool haze_color(bs_level_view *v, const bs_vfs *vfs, const char *suffix, float out[3])
+bool bs_level_view_haze_color(bs_level_view *v, const bs_vfs *vfs, const char *suffix, float out[3])
 {
     char name[64];
     snprintf(name, sizeof name, "GAMEDATA/HAZE.%s", suffix);
@@ -55,7 +55,7 @@ static void apply_settings(bs_level_view *v, bs_assets *assets, const bs_vfs *vf
      * wall at the edge of view) or 8 ("C" levels: haze over the whole range).
      */
     memset(s->fog_color, 0, sizeof s->fog_color);
-    if (info && info->haze[0] && !haze_color(v, vfs, info->haze, s->fog_color)) {
+    if (info && info->haze[0] && !bs_level_view_haze_color(v, vfs, info->haze, s->fog_color)) {
         const bs_bsi_image *sky = info->sky[0] ? bs_assets_image(assets, info->sky) : NULL;
         if (sky && sky->width && sky->height && sky->pixels)
             horizon_color(sky, s->fog_color);
@@ -119,7 +119,10 @@ bs_result bs_level_view_load_ex(bs_level_view *v, bs_assets *assets, const bs_vf
         const bs_bs6_object *o = &v->level.objects[i];
         const char *model = o->model < v->level.model_count ? v->level.model_names[o->model] : "";
         bool sigil = bs_strncasecmp(model, "sigil", 5) == 0 && model[5];
-        separate[i] = r == BS_OK && (g.ctrl_count || g.link_count || bs_bs6_logic_has_items(&g) || sigil ||
+        /* Boats and the balloon can be ridden (GAME.EXE 0x23DD5, 0x240CC). */
+        bool ride = !bs_strcasecmp(model, "boat") || !bs_strcasecmp(model, "boat2") ||
+                    !bs_strcasecmp(model, "l8balon1");
+        separate[i] = r == BS_OK && (g.ctrl_count || g.link_count || bs_bs6_logic_has_items(&g) || sigil || ride ||
                                      bs_bs6_logic_prop(&g, 103) || bs_bs6_logic_prop(&g, 110) ||
                                      bs_bs6_logic_prop(&g, 111));
     }
@@ -173,8 +176,11 @@ bs_result bs_level_view_load_ex(bs_level_view *v, bs_assets *assets, const bs_vf
     v->loaded = true;
     apply_settings(v, assets, vfs, fog_scale, settings);
     /* Water: LEVELS.TXT mode[1] 'Y' loads water2.bsi (RE: 0x262AC); the height is the level's WATR. */
-    if (info && info->mode[1] == 'Y')
+    if (info && info->mode[1] == 'Y') {
         bs_level_renderer_set_water(v->renderer, bs_assets_image(assets, "water2.bsi"), (float)v->level.water);
+        v->water = true;
+        v->water_y = (float)v->level.water;
+    }
     return BS_OK;
 }
 

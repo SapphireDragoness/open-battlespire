@@ -69,6 +69,11 @@ typedef struct bs_item_tables {
 /* Finds the tables in GAME.EXE's bytes. BS_ERR_NOT_FOUND if they aren't there. */
 bs_result bs_item_tables_read(const uint8_t *exe, size_t size, bs_item_tables *out);
 
+/* A base item's whole record in GAME.EXE's bytes (BS_ITEM_BASE_RECORD bytes): what a new item object copies
+ * first (0x521AB). NULL if the table isn't there. */
+#define BS_ITEM_BASE_RECORD 0x2F2
+const uint8_t *bs_item_base_record(const uint8_t *exe, size_t size, uint32_t base);
+
 /*
  * The item model names (a table of string pointers at 0xEFD89 in v1.5,
  * loaded at 0x5152F), from the loaded executable: some names are shared, so

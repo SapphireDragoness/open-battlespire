@@ -64,11 +64,19 @@ bs_result bs_level_renderer_set_water(bs_level_renderer *r, const bs_bsi_image *
 void bs_level_renderer_draw(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int width,
                             int height, double time);
 
+/* Draws the view small, into the rectangle (x, y, w, h) of the 640x480 screen (letterboxed in the window);
+ * the rest of the window is black. The help screens show the game this way (0x20A95). */
+void bs_level_renderer_draw_inset(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int width,
+                                  int height, double time, int x, int y, int w, int h);
+
 /* Moves a separate object (see bs_scene_build_ex) to a new placement. */
 void bs_level_renderer_place(bs_level_renderer *r, uint32_t object, const float pos[3], const int32_t angles[3]);
 
 /* Shows or hides a separate object. */
 void bs_level_renderer_show(bs_level_renderer *r, uint32_t object, bool visible);
+
+/* Shows or hides a flat's sprite (an NPC who leaves). */
+void bs_level_renderer_show_flat(bs_level_renderer *r, uint32_t flat, bool visible);
 
 /* Shows another image wherever the level uses the texture first named `name` (as the game swaps a
  * counter's texture, 0x3E448). Returns how many materials changed. */
@@ -78,6 +86,8 @@ uint32_t bs_level_renderer_set_texture(bs_level_renderer *r, const char *name, c
 typedef struct bs_level_instance {
     uint32_t object;
     bs_scene_xform xform;
+    bool front;                  /* drawn last, over the level and sprites (the weapon in hand: the game's
+                                    doesn't go into walls) */
 } bs_level_instance;
 
 /* Sets the extra copies drawn with the level (items lying where they were dropped), replacing the last set. */

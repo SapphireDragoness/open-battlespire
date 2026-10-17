@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "bs/core/log.h"
+#include "bs/game/levelling.h"
 
 /* RE references are GAME.EXE addresses; see docs/formats/creatures.md. */
 
@@ -20,10 +21,15 @@
 static const int16_t swing_sound[BS_ITEM_LAST_WEAPON + 1] = {418, 418, 416, 416, 416, 415, 415, 415,
                                                              -1,  -1,  -1,  419, -1,  419, 419};
 #define DEATH_ENDING_MS 2000     /* (0x135DD) */
+#define SWITCH_BOW_WAIT_MS 2000  /* a bow switched to shows this much later (0x48D85, 0x48C64) */
+#define WALL_REACH 90.0f         /* a wall this near ahead pulls the weapon back (0x40698) */
+/* Where the wall test starts, in the body's frame (0x405EB): 15 right, 45 up. */
+static const float wall_test_from[3] = {15.0f, -45.0f, 0.0f};
 
 void fight_init(fight *f, const uint8_t *exe, size_t size, bool monsters_on)
 {
     memset(f, 0, sizeof *f);
+    f->talk_to = UINT32_MAX;
     f->monsters_on = monsters_on;
     f->have_tables = exe && bs_creature_tables_read(exe, size, &f->tables) == BS_OK;
     if (!f->have_tables)
@@ -58,8 +64,17 @@ static void message_with(const fight_env *env, uint32_t id, const char *s)
         env->message(env->ctx, out);
 }
 
-/* The loot of a spawn point (STRU 116 on its flat) on the floor at pos, 4 above it as dropped items lie
- * (0x52731). Returns how many items. */
+/* The floor under pos, 4 above it as dropped items lie (0x52731). */
+static void floor_under(const fight_env *env, const float pos[3], float at[3])
+{
+    float from[3] = {pos[0], pos[1] - 32.0f, pos[2]}, to[3] = {pos[0], pos[1] + 2000.0f, pos[2]}, t;
+    int32_t ob;
+    memcpy(at, pos, sizeof(float) * 3);
+    if (bs_collision_segment(env->collision, from, to, &t, &ob))
+        at[1] = from[1] + t * (to[1] - from[1]) - 4.0f;
+}
+
+/* The loot of a spawn point (STRU 116 on its flat) on the floor at pos. Returns how many items. */
 static uint32_t drop_loot(const fight_env *env, uint32_t flat, const float pos[3])
 {
     if (!env->db || !env->db->tables || flat >= env->level->flat_count)
@@ -68,11 +83,8 @@ static uint32_t drop_loot(const fight_env *env, uint32_t flat, const float pos[3
     bs_arena_init(&tmp, 0);
     bs_bs6_logic lg;
     uint32_t n = 0;
-    float from[3] = {pos[0], pos[1] - 32.0f, pos[2]}, to[3] = {pos[0], pos[1] + 2000.0f, pos[2]}, t;
-    int32_t ob;
-    float at[3] = {pos[0], pos[1], pos[2]};
-    if (bs_collision_segment(env->collision, from, to, &t, &ob))
-        at[1] = from[1] + t * (to[1] - from[1]) - 4.0f;
+    float at[3];
+    floor_under(env, pos, at);
     if (bs_bs6_entity_logic(&env->level->flats[flat].chunk, &tmp, &lg) == BS_OK) {
         for (uint32_t k = 0; k < lg.prop_count; k++) {
             if (lg.props[k].id != PROP_LOOT)
@@ -112,15 +124,38 @@ static void load_spell_images(fight *f, const fight_env *env)
     }
 }
 
+/* A creature's images, the first time it's needed. */
+static void load_images(fight *f, const fight_env *env, uint32_t t)
+{
+    if (t >= BS_CREATURE_COUNT || f->images[t][0])
+        return;
+    for (uint32_t s = 0; s < BS_CREATURE_IMAGES; s++) {
+        const char *name = f->tables.creatures[t].images[s];
+        if (!name[0])
+            continue;
+        const bs_bsi_image *img = bs_assets_image(env->assets, name);
+        f->images[t][s] = img;
+        if (img)
+            f->anims[t][s] = (bs_anim_info){img->frames ? img->frames : 1,
+                                            img->bhdr[8] > 0 ? (uint32_t)img->bhdr[8] : 71};
+        else
+            BS_WARN("no image %s for the %s", name, f->tables.creatures[t].name);
+    }
+}
+
 void fight_enter_level(fight *f, const fight_env *env, const bs_level_info *info, bs_arena *arena)
 {
     bs_magic_reset(&f->magic);
+    f->talk_to = UINT32_MAX;
     if (!f->hands[0])
         load_spell_images(f, env);
     f->monsters.count = 0;
     f->player_died = 0;
     f->punching = false;
     bs_hand_reset(&f->hand); /* raised again in the new level */
+    bs_arrows_clear(&f->arrows);
+    f->stuck_count = 0;
+    f->attack_was_held = false;
     memcpy(f->last_feet, env->player->pos, sizeof f->last_feet);
     memset(f->motion, 0, sizeof f->motion);
     f->have_nodes = false;
@@ -157,23 +192,90 @@ void fight_enter_level(fight *f, const fight_env *env, const bs_level_info *info
     if (bs_monsters_spawn(&f->monsters, &f->tables, env->collision, env->level_number, percent, env->rng) != BS_OK)
         BS_WARN("cannot spawn the monsters");
     /* The images of the creatures there. */
-    for (uint32_t i = 0; i < f->monsters.count; i++) {
-        uint32_t t = f->monsters.list[i].type;
-        if (f->images[t][0])
+    for (uint32_t i = 0; i < f->monsters.count; i++)
+        load_images(f, env, f->monsters.list[i].type);
+}
+
+void fight_restore(fight *f, const fight_env *env, const bs_saved_monster *list, uint32_t count)
+{
+    f->monsters.count = 0;
+    f->talk_to = UINT32_MAX;
+    for (uint32_t i = 0; i < count; i++) {
+        const bs_saved_monster *s = &list[i];
+        /* A spawned monster's id is its spawn point's flat's. */
+        uint32_t point = UINT32_MAX;
+        for (uint32_t p = 0; p < f->monsters.point_count && point == UINT32_MAX; p++)
+            if (f->monsters.points[p].flat < env->level->flat_count &&
+                env->level->flats[f->monsters.points[p].flat].id == s->id)
+                point = p;
+        if (!f->have_tables || !f->monsters_on || s->type >= BS_CREATURE_COUNT) {
+            /* No monsters: what they hold lies where they stood. */
+            float at[3];
+            floor_under(env, s->pos, at);
+            bs_items_drop_held(env->items, i, at);
             continue;
-        for (uint32_t s = 0; s < BS_CREATURE_IMAGES; s++) {
-            const char *name = f->tables.creatures[t].images[s];
-            if (!name[0])
-                continue;
-            const bs_bsi_image *img = bs_assets_image(env->assets, name);
-            f->images[t][s] = img;
-            if (img)
-                f->anims[t][s] = (bs_anim_info){img->frames ? img->frames : 1,
-                                                img->bhdr[8] > 0 ? (uint32_t)img->bhdr[8] : 71};
-            else
-                BS_WARN("no image %s for the %s", name, f->tables.creatures[t].name);
         }
+        uint32_t index = f->monsters.count;
+        bs_monster *m = bs_monsters_add(&f->monsters, &f->tables, s->type, s->pos, env->collision);
+        if (!m) {
+            BS_WARN("cannot restore the monsters");
+            return;
+        }
+        /* The held items name the monsters by their order in the save: keep that. */
+        if (index != i)
+            for (uint32_t k = 0; k < env->items->count; k++)
+                if (env->items->items[k].place.where == BS_ITEM_HELD && env->items->items[k].place.ref == i)
+                    env->items->items[k].place.ref = index;
+        m->spawn = point;
+        m->angle = s->angle;
+        memcpy(m->attributes, s->attributes, sizeof m->attributes);
+        m->health = s->health;
+        m->health_max = s->health_max;
+        m->spell_points = s->spell_points;
+        m->spell_points_max = s->spell_points_max;
+        m->skill = s->skill;
+        m->flags = s->flags;
+        m->state = (bs_ai_state)s->state;
+        m->greeted = s->greeted;
+        m->summoned = s->summoned;
+        m->ally = s->ally;
+        if (point != UINT32_MAX) {
+            const bs_spawn_point *p = &f->monsters.points[point];
+            m->has_code = p->code[0] != 0;
+            if (p->has_record)
+                for (int k = 0; k < 5; k++)
+                    m->spells[k] = p->record[8 + k];
+        }
+        /* Level 5's Hernes (as bs_monsters_spawn). */
+        m->unhurt = env->level_number == 5 && s->type == BS_CREATURE_HERNE;
+        if (m->unhurt)
+            m->pools[BS_POOL_REFLECT] = 1000000; /* HERNE_POOL in monsters.c (0x46601) */
+        load_images(f, env, s->type);
     }
+}
+
+void fight_summon_at(fight *f, const fight_env *env, uint32_t type, const float pos[3], int count)
+{
+    if (!f->have_tables || type >= BS_CREATURE_COUNT)
+        return;
+    load_images(f, env, type);
+    for (int k = 0; k < count; k++) {
+        /* Around the point, a quarter turn apart and further out each round (the game's placing, 0x47B33,
+         * isn't decoded). */
+        float a = (float)k * 1.5707963f, r = 96.0f + 48.0f * (float)(k / 4);
+        float p[3] = {pos[0] + sinf(a) * r, pos[1], pos[2] + cosf(a) * r};
+        bs_monsters_add(&f->monsters, &f->tables, type, p, env->collision);
+    }
+}
+
+void fight_monster_state(fight *f, uint32_t i, int state)
+{
+    if (i >= f->monsters.count)
+        return;
+    bs_monster *m = &f->monsters.list[i];
+    m->state = (bs_ai_state)state;
+    m->has_goal = false;
+    m->path_len = m->path_at = 0;
 }
 
 void fight_mouse(fight *f, float dx, float dy)
@@ -182,8 +284,9 @@ void fight_mouse(fight *f, float dx, float dy)
     f->motion[f->motion_at][1] += dy;
 }
 
-/* The player as a fighter: the character's attributes and skills, the weapon in hand, the armour worn. */
-static void player_fighter(const fight_env *env, bs_fighter *out, uint32_t *weapon_index)
+/* The player as a fighter: the character's attributes and skills, the weapon in hand, the armour worn; and
+ * which skill its weapon uses (the weapon table's +0x14). */
+static void player_fighter(const fight_env *env, bs_fighter *out, uint32_t *weapon_index, int *skill_index)
 {
     const bs_character *ch = env->character;
     memset(out, 0, sizeof *out);
@@ -213,16 +316,192 @@ static void player_fighter(const fight_env *env, bs_fighter *out, uint32_t *weap
     }
     int32_t skill = ws && ws->skill >= 0 && ws->skill < BS_SKILL_COUNT ? ws->skill : BS_SKILL_HAND_TO_HAND;
     out->weapon_skill = ch->skills[skill];
+    if (skill_index)
+        *skill_index = skill;
     out->damage_min = ws ? ws->damage_min : 1;
     out->damage_max = ws ? ws->damage_max : 2;
     if (env->items)
         bs_items_armour_values(env->items, out->armour);
 }
 
-static bool uses_missiles(const fight_env *env, uint32_t weapon_index)
+static const bs_monster_world *world_of(fight *f, const fight_env *env, bs_monster_world *w);
+
+/* Angles in the game's units (2048 a turn): the body's yaw, and the view's pitch, + down as the game keeps
+ * it. */
+static int32_t body_yaw(const fight_env *env)
 {
-    return weapon_index < BS_ITEM_WEAPON_COUNT - 1 && env->db && env->db->tables &&
-           env->db->tables->weapons[weapon_index].skill == 19;
+    return (int32_t)lroundf(env->player->yaw * 2048.0f / (2.0f * 3.14159265f)) & 0x7FF;
+}
+
+static int32_t view_pitch(const fight_env *env)
+{
+    return (int32_t)lroundf(-env->aim_pitch * 2048.0f / (2.0f * 3.14159265f)) & 0x7FF;
+}
+
+/* A wall within reach straight ahead of the weapon (0x405EB → 0x2CC86). */
+static bool wall_ahead(const fight_env *env)
+{
+    if (!env->collision)
+        return false;
+    float off[3], from[3], to[3], t;
+    bs_hand_offset(body_yaw(env), wall_test_from, off);
+    for (int k = 0; k < 3; k++)
+        from[k] = env->player->pos[k] + off[k];
+    to[0] = from[0] + sinf(env->player->yaw) * WALL_REACH;
+    to[1] = from[1];
+    to[2] = from[2] + cosf(env->player->yaw) * WALL_REACH;
+    int32_t ob;
+    return bs_collision_segment(env->collision, from, to, &t, &ob);
+}
+
+/* A bow's nocked arrow where it is now, if there is one. */
+static bool nocked_arrow(const fight *f, const fight_env *env, bs_scene_xform *out)
+{
+    bs_hand_pose p;
+    bool arrow;
+    if (!bs_hand_bow_pose(&f->hand, view_pitch(env), &p, &arrow) || !arrow)
+        return false;
+    int32_t yaw = body_yaw(env);
+    bs_hand_rotation(yaw, p.angles, out->rot);
+    float off[3];
+    bs_hand_offset(yaw, p.offset, off);
+    for (int k = 0; k < 3; k++)
+        out->pos[k] = env->player->pos[k] + off[k];
+    return true;
+}
+
+static bool is_bow(int base)
+{
+    return base == 8 || base == 9 || base == 10;
+}
+
+/* The weapons swap (0x48C9F) and the new one comes to hand: raised, or a bow shown 2 s later. */
+static void do_switch(fight *f, const fight_env *env)
+{
+    bs_items_switch_weapons(env->items);
+    uint32_t w = bs_items_weapon(env->items);
+    int base = w != UINT32_MAX && env->items->items[w].item.base <= BS_ITEM_LAST_WEAPON ? (int)env->items->items[w].item.base : -1;
+    bs_hand_equip(&f->hand, base, env->now_ms, is_bow(base) ? SWITCH_BOW_WAIT_MS : 0);
+}
+
+void fight_switch_weapon(fight *f, const fight_env *env)
+{
+    if (f->player_died || !env->items)
+        return;
+    uint32_t s = bs_items_secondary(env->items);
+    int secondary = s != UINT32_MAX ? (int)env->items->items[s].item.base : -1;
+    bool arrows = bs_items_arrows(env->items) != UINT32_MAX;
+    switch (bs_hand_request_switch(&f->hand, secondary, arrows, env->now_ms)) {
+    case BS_SWITCH_NOW:
+        do_switch(f, env);
+        break;
+    case BS_SWITCH_NO_ARROWS:
+        env->message(env->ctx, bs_exe_message(env->text, BS_MSG_NO_ARROWS));
+        break;
+    case BS_SWITCH_LOWERING:
+        break; /* swapped when it's down (BS_HAND_SWITCH) */
+    }
+}
+
+/* The weapon in hand wore out (0x512B5): the secondary comes to hand. */
+static void weapon_destroyed(fight *f, const fight_env *env, const bs_item *it)
+{
+    char name[64];
+    if (env->db)
+        bs_item_name(env->db, it, name, sizeof name);
+    else
+        name[0] = '\0';
+    message_with(env, BS_MSG_DESTROYED, name);
+    bs_hand_equip(&f->hand, -1, env->now_ms, 0);
+    fight_switch_weapon(f, env);
+}
+
+/* The bow looses (0x49C55): one arrow from the arrows ready flies from where it was nocked, the bow wears;
+ * after the last arrow the secondary weapon comes to hand, or the bow is put away (0x4A79A). */
+static void shoot(fight *f, const fight_env *env, const bs_scene_xform *nock)
+{
+    uint32_t w = env->items ? bs_items_weapon(env->items) : UINT32_MAX;
+    bs_item arrow;
+    if (w == UINT32_MAX || !bs_items_take_arrow(env->items, &arrow))
+        return;
+    float eye[3];
+    bs_player_eye(env->player, eye);
+    play(env, BS_ARROW_SHOOT_SOUND, eye);
+    bs_skill_used(env->character, BS_SKILL_MISSILE, 1); /* (0x49C6F) */
+    bs_arrows_launch(&f->arrows, &arrow, nock->pos, view_pitch(env), body_yaw(env), nock->rot);
+    bs_item bow = env->items->items[w].item;
+    if (bs_items_wear(env->items, w, 1)) {
+        weapon_destroyed(f, env, &bow);
+        return;
+    }
+    if (bs_items_arrows(env->items) != UINT32_MAX)
+        return;
+    env->message(env->ctx, bs_exe_message(env->text, BS_MSG_NO_MORE_ARROWS));
+    fight_switch_weapon(f, env);
+    if (f->hand.bow) {
+        bs_items_unequip(env->items, w);
+        bs_hand_equip(&f->hand, -1, env->now_ms, 0);
+    }
+}
+
+/* An arrow hits monster i (0x4A27A): the hit sound; then, unless it takes no harm, "Arrow hits!" and the
+ * damage by the weapon now in hand. Half the time the arrow stays in the monster. */
+static void arrow_hits(fight *f, const fight_env *env, const bs_arrow_hit *h, bs_monster_events *ev)
+{
+    bs_monster *m = &f->monsters.list[h->monster];
+    if (h->stuck && f->stuck_count < FIGHT_STUCK) {
+        f->stuck[f->stuck_count].monster = h->monster;
+        f->stuck[f->stuck_count].item = h->item;
+        f->stuck_count++;
+    }
+    play(env, BS_ARROW_HIT_SOUND, m->body.pos);
+    if (m->unhurt)
+        return; /* level 5's Hernes (0x4A325) */
+    env->message(env->ctx, bs_exe_message(env->text, BS_MSG_ARROW_HITS));
+    if (!env->db || !env->db->tables)
+        return;
+    int loc = bs_hit_location(env->rng);
+    const bs_character *ch = env->character;
+    uint32_t w = env->items ? bs_items_weapon(env->items) : UINT32_MAX;
+    const bs_item *in_hand = w != UINT32_MAX && env->items->items[w].item.base <= BS_ITEM_LAST_WEAPON
+                                 ? &env->items->items[w].item : NULL;
+    uint32_t base = in_hand ? in_hand->base : BS_ITEM_WEAPON_COUNT - 1;
+    const bs_weapon_stats *ws = &env->db->tables->weapons[base];
+    bs_arrow_shot shot = {
+        .bow = base,
+        .damage_min = ws->damage_min,
+        .damage_max = ws->damage_max,
+        .skill = ch->skills[BS_SKILL_MISSILE],
+        .bow_material = in_hand ? (int32_t)in_hand->material : 1,
+        .strength = bs_character_attribute(ch, 0),
+    };
+    bs_fighter mf;
+    bs_monster_fighter(m, &f->tables.creatures[m->type], &mf);
+    int32_t damage = bs_arrow_damage(&shot, &h->item, mf.armour[loc], env->rng);
+    if (damage <= 0)
+        return;
+    bs_monster_world mw;
+    if (bs_monster_hurt(&f->monsters, h->monster, world_of(f, env, &mw), damage, damage, env->player->pos,
+                        ch->health, ev))
+        message_with(env, BS_MSG_DIES, f->tables.creatures[m->type].name);
+}
+
+/* The arrows stuck in a monster that's gone fall where it lay. */
+static bool drop_stuck(fight *f, const fight_env *env, uint32_t monster, const float pos[3])
+{
+    bool any = false;
+    float at[3];
+    floor_under(env, pos, at);
+    for (uint32_t k = 0; k < f->stuck_count;) {
+        if (f->stuck[k].monster != monster) {
+            k++;
+            continue;
+        }
+        bs_item_place place = {BS_ITEM_FLOOR, bs_items_cell(env->grid_cell, at)};
+        any |= env->items && bs_items_add(env->items, &f->stuck[k].item, place, -1, at) != UINT32_MAX;
+        f->stuck[k] = f->stuck[--f->stuck_count];
+    }
+    return any;
 }
 
 /* Bare hands (0x494E7): the punch sprite plays. */
@@ -279,11 +558,12 @@ void fight_attack_pressed(fight *f, const fight_env *env)
         magic_events(f, env, &ev);
         bool dropped = false;
         monster_events(f, env, &mev, &dropped);
+        f->press_used = true;
         return;
     }
     bs_fighter pf;
     uint32_t wi;
-    player_fighter(env, &pf, &wi);
+    player_fighter(env, &pf, &wi, NULL);
     if (pf.armed || f->punching || f->player_died)
         return;
     /* A punch: the last swing's factors (0x41265 keeps 0x16BFC8 / 0x16BFD0). */
@@ -306,6 +586,9 @@ static const bs_monster_world *world_of(fight *f, const fight_env *env, bs_monst
         .now_ms = env->now_ms,
         .spells = env->spells,
         .player_flags = env->character->flags,
+        .player_can_talk = fight_can_talk(f, env),
+        .water = env->water,
+        .water_y = env->water_y,
     };
     return w;
 }
@@ -337,9 +620,10 @@ static void player_strikes(fight *f, const fight_env *env, bs_monster_events *ev
 {
     bs_fighter pf;
     uint32_t wi;
-    player_fighter(env, &pf, &wi);
-    if (uses_missiles(env, wi) || (env->character->flags & BS_FLAG_ETHEREAL))
-        return; /* bows shoot arrows: not yet; an ethereal player's blows pass through (0x49771) */
+    int skill;
+    player_fighter(env, &pf, &wi, &skill);
+    if (env->character->flags & BS_FLAG_ETHEREAL)
+        return; /* an ethereal player's blows pass through (0x49771) */
     bs_monster_world w;
     world_of(f, env, &w);
     float eye[3];
@@ -369,6 +653,10 @@ static void player_strikes(fight *f, const fight_env *env, bs_monster_events *ev
         bs_fighter mf;
         bs_monster_fighter(m, &f->tables.creatures[m->type], &mf);
         bs_melee hit = bs_melee_roll(&pf, &mf, f->swing.skill_mult, f->swing.damage_mult, env->rng);
+        /* Each blow counts for the weapon's skill (0x424CB), each that hits for Critical Strike (0x429A3). */
+        bs_skill_used(env->character, skill, 1);
+        if (hit.outcome == BS_MELEE_HIT)
+            bs_skill_used(env->character, BS_SKILL_CRITICAL, 1);
         if (hit.message)
             env->message(env->ctx, bs_exe_message(env->text, hit.message));
         m->delay = -20;
@@ -394,9 +682,10 @@ static void monster_strikes(fight *f, const fight_env *env, uint32_t i)
         return; /* blows pass through an ethereal player (0x42475) */
     bs_fighter pf, mf;
     uint32_t wi;
-    player_fighter(env, &pf, &wi);
+    player_fighter(env, &pf, &wi, NULL);
     bs_monster_fighter(m, &f->tables.creatures[m->type], &mf);
     bs_melee hit = bs_melee_roll(&mf, &pf, 4, 4, env->rng);
+    bs_skill_used(env->character, BS_SKILL_DODGING, 1); /* each blow at the player counts (0x4284B) */
     env->character->shield = hit.shield;
     if (hit.outcome == BS_MELEE_MISS) {
         play(env, bs_miss_sound(0, env->rng), m->body.pos);
@@ -507,13 +796,21 @@ static void monster_events(fight *f, const fight_env *env, bs_monster_events *ev
         case BS_MONSTER_STRIKE:
             monster_strikes(f, env, e.monster);
             break;
+        case BS_MONSTER_TALK:
+            f->talk_to = e.monster;
+            break;
         case BS_MONSTER_GREET:
             message_with(env, (uint32_t)e.value, f->tables.creatures[f->monsters.list[e.monster].type].name);
             break;
         case BS_MONSTER_GONE: {
             const bs_monster *m = &f->monsters.list[e.monster];
-            if (m->spawn < f->monsters.point_count && f->monsters.points[m->spawn].loot)
+            float at[3];
+            floor_under(env, m->body.pos, at);
+            if (env->items && bs_items_drop_held(env->items, e.monster, at))
+                *dropped = true; /* its loot, as a save left it */
+            else if (m->spawn < f->monsters.point_count && f->monsters.points[m->spawn].loot)
                 *dropped |= drop_loot(env, f->monsters.points[m->spawn].flat, m->body.pos) > 0;
+            *dropped |= drop_stuck(f, env, e.monster, m->body.pos);
             break;
         }
         case BS_MONSTER_CAST: {
@@ -537,14 +834,13 @@ bool fight_update(fight *f, const fight_env *env, bool attack_held, uint32_t dt_
     bs_monster_events ev = {.count = 0};
     bs_fighter pf;
     uint32_t wi;
-    player_fighter(env, &pf, &wi);
+    player_fighter(env, &pf, &wi, NULL);
     /* The weapon in hand follows what's wielded: a new one is raised (0x48DF3). */
     int wield = pf.armed ? (int)wi : -1;
     if (wield != f->hand.weapon)
-        bs_hand_equip(&f->hand, wield, env->now_ms);
-    bool bow = pf.armed && uses_missiles(env, wi);
+        bs_hand_equip(&f->hand, wield, env->now_ms, 0);
     /* The swing: the last eight frames' mouse motion (0x21476) while the button is held (0x41296). */
-    bool ready = pf.armed ? bs_hand_can_swing(&f->hand) && !bow : !f->punching;
+    bool ready = pf.armed ? bs_hand_can_swing(&f->hand) && !f->hand.bow : !f->punching;
     if (attack_held && ready && !f->player_died) {
         float sx = 0, sy = 0;
         for (int k = 0; k < 8; k++) {
@@ -562,12 +858,34 @@ bool fight_update(fight *f, const fight_env *env, bool attack_held, uint32_t dt_
     }
     f->motion_at = (f->motion_at + 1) % 8;
     f->motion[f->motion_at][0] = f->motion[f->motion_at][1] = 0;
-    /* The hand bobs while the player moves (0x407A6); a bow is drawn while the button is held. */
+    /* The hand bobs while the player moves (0x407A6), pulls back from a wall right ahead (0x405EB); a bow
+     * shoots on a press (0x49C25). */
     const float *feet = env->player->pos;
-    bool moving = feet[0] != f->last_feet[0] || feet[1] != f->last_feet[1] || feet[2] != f->last_feet[2];
+    bs_hand_input in = {
+        .moving = feet[0] != f->last_feet[0] || feet[1] != f->last_feet[1] || feet[2] != f->last_feet[2],
+        .blocked = f->hand.weapon >= 0 && wall_ahead(env),
+        .attack_pressed = attack_held && !f->attack_was_held && !f->press_used && !f->player_died,
+        .ethereal = (env->character->flags & BS_FLAG_ETHEREAL) != 0,
+        .speed = bs_character_attribute(env->character, 6),
+    };
     memcpy(f->last_feet, feet, sizeof f->last_feet);
-    if (bs_hand_update(&f->hand, env->now_ms, moving, bow && attack_held && !f->player_died))
+    f->attack_was_held = attack_held;
+    f->press_used = false;
+    bs_scene_xform nock;
+    bool nocked = nocked_arrow(f, env, &nock);
+    int hand = bs_hand_update(&f->hand, env->now_ms, &in);
+    if (hand & BS_HAND_STRUCK)
         player_strikes(f, env, &ev);
+    if (hand & BS_HAND_SWITCH)
+        do_switch(f, env);
+    if ((hand & BS_HAND_SHOOT) && nocked)
+        shoot(f, env, &nock);
+    /* Arrows in flight. */
+    bs_arrow_hits hits;
+    bs_arrows_update(&f->arrows, dt_ms, env->collision, f->have_tables ? &f->monsters : NULL, env->player->pos,
+                     env->rng, &hits);
+    for (uint32_t k = 0; k < hits.count; k++)
+        arrow_hits(f, env, &hits.list[k], &ev);
     if (f->punching) {
         bool done;
         uint32_t frame = frame_at(f->punch, env->now_ms - f->punch_start, &done);
@@ -641,6 +959,43 @@ void fight_drink(fight *f, const fight_env *env, int spell)
     magic_events(f, env, &ev);
     bool dropped = false;
     monster_events(f, env, &mev, &dropped);
+}
+
+bool fight_can_talk(const fight *f, const fight_env *env)
+{
+    if (f->player_died)
+        return false;
+    int st = f->hand.state;
+    return f->hand.weapon < 0 || st == BS_HAND_IDLE || st == BS_HAND_WALK || st == BS_HAND_RECOVER ||
+           wall_ahead(env);
+}
+
+uint32_t fight_monster_ahead(const fight *f, const fight_env *env, float max, float *distance)
+{
+    float eye[3];
+    bs_player_eye(env->player, eye);
+    float cp = cosf(env->aim_pitch);
+    float fwd[3] = {sinf(env->aim_yaw) * cp, -sinf(env->aim_pitch), cosf(env->aim_yaw) * cp};
+    float to[3] = {eye[0] + fwd[0] * max, eye[1] + fwd[1] * max, eye[2] + fwd[2] * max}, t;
+    int32_t ob;
+    float best_t = env->collision && bs_collision_segment(env->collision, eye, to, &t, &ob) ? t * max : max;
+    uint32_t best = UINT32_MAX;
+    /* Its body a 32-unit column from its feet up to its eye, as for touch spells. */
+    for (uint32_t i = 0; i < f->monsters.count; i++) {
+        const bs_monster *m = &f->monsters.list[i];
+        if (m->dead || m->gone)
+            continue;
+        float c[3] = {m->body.pos[0] - eye[0], m->body.pos[1] - MONSTER_EYE * 0.5f - eye[1], m->body.pos[2] - eye[2]};
+        float along = c[0] * fwd[0] + c[1] * fwd[1] + c[2] * fwd[2];
+        float d2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2] - along * along;
+        if (along > 0 && along < best_t && d2 <= 32.0f * 32.0f) {
+            best_t = along;
+            best = i;
+        }
+    }
+    if (distance)
+        *distance = best_t;
+    return best;
 }
 
 bool fight_use(fight *f, const fight_env *env, float reach)
@@ -754,19 +1109,41 @@ bool fight_draw_hud(fight *f, const fight_env *env, bs_overlay *o)
     return moving || m->ready;
 }
 
-bool fight_hand(const fight *f, const fight_env *env, bs_scene_xform *out, int *weapon)
+uint32_t fight_models(const fight *f, const fight_env *env, bs_scene_xform *out, int *model, uint32_t *in_hand)
 {
+    uint32_t n = 0;
+    int32_t yaw = body_yaw(env);
     bs_hand_pose p;
-    if (f->player_died || !bs_hand_pose_at(&f->hand, env->now_ms, &p))
-        return false;
-    int32_t yaw = (int32_t)lroundf(env->player->yaw * 2048.0f / (2.0f * 3.14159265f)) & 0x7FF;
-    bs_hand_rotation(yaw, p.angles, out->rot);
-    float off[3];
-    bs_hand_offset(yaw, p.offset, off);
-    for (int k = 0; k < 3; k++)
-        out->pos[k] = env->player->pos[k] + off[k];
-    *weapon = f->hand.weapon;
-    return true;
+    bool arrow;
+    if (f->player_died) {
+        /* nothing in hand */
+    } else if (bs_hand_pose_at(&f->hand, env->now_ms, &p)) {
+        bs_hand_rotation(yaw, p.angles, out[n].rot);
+        float off[3];
+        bs_hand_offset(yaw, p.offset, off);
+        for (int k = 0; k < 3; k++)
+            out[n].pos[k] = env->player->pos[k] + off[k];
+        model[n++] = f->hand.weapon;
+    } else if (bs_hand_bow_pose(&f->hand, view_pitch(env), &p, &arrow)) {
+        bs_hand_bow_rotation(yaw, p.angles, out[n].rot);
+        float off[3];
+        bs_hand_offset(yaw, p.offset, off);
+        for (int k = 0; k < 3; k++)
+            out[n].pos[k] = env->player->pos[k] + off[k];
+        model[n++] = f->hand.weapon;
+        if (arrow && nocked_arrow(f, env, &out[n]))
+            model[n++] = FIGHT_MODEL_ARROW;
+    }
+    *in_hand = n;
+    for (int i = 0; i < BS_ARROWS && n < FIGHT_MODELS; i++) {
+        const bs_arrow *a = &f->arrows.list[i];
+        if (!a->live)
+            continue;
+        memcpy(out[n].rot, a->rot, sizeof a->rot);
+        memcpy(out[n].pos, a->pos, sizeof a->pos);
+        model[n++] = FIGHT_MODEL_ARROW;
+    }
+    return n;
 }
 
 void fight_draw(fight *f, const float eye[3], uint32_t now_ms, bs_level_renderer *r)

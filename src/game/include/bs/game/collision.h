@@ -53,8 +53,11 @@ bs_result bs_collision_build(const bs_scene *scene, const bs_bs6_level *level, b
 /* Moves a separate object. */
 void bs_collision_place(bs_collision_world *w, uint32_t object, const float pos[3], const int32_t angles[3]);
 
-/* Takes a separate object out of the world (an item picked up). */
+/* Takes a separate object out of the world (an item picked up, a boat ridden). */
 void bs_collision_remove(bs_collision_world *w, uint32_t object);
+
+/* Puts a separate object taken out back into the world. */
+void bs_collision_restore(bs_collision_world *w, uint32_t object);
 
 /* Triangles a sphere overlaps; returns how many (at most max are stored). */
 uint32_t bs_collision_sphere(const bs_collision_world *w, const float center[3], float radius,

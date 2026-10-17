@@ -159,10 +159,12 @@ static bs_monster_world make_world(const bs_player *p, bs_rng *r, uint32_t now, 
         .player = p,
         .rng = r,
         .now_ms = now,
+        .player_can_talk = true,
     };
 }
 
 /* Runs the monsters for ms milliseconds in 20 ms frames, counting events of a kind. */
+/* (BS_MONSTER_GREET counts the conversations the greeting may start instead.) */
 static uint32_t run(bs_monsters *ms, const bs_player *p, bs_rng *r, uint32_t *now, uint32_t ms_total,
                     const bs_nav_graph *nodes, bs_monster_event_kind kind)
 {
@@ -173,7 +175,7 @@ static uint32_t run(bs_monsters *ms, const bs_player *p, bs_rng *r, uint32_t *no
         bs_monster_events ev = {.count = 0};
         bs_monsters_update(ms, &w, 20, &ev);
         for (uint32_t k = 0; k < ev.count; k++)
-            n += ev.list[k].kind == kind;
+            n += ev.list[k].kind == kind || (kind == BS_MONSTER_GREET && ev.list[k].kind == BS_MONSTER_TALK);
     }
     return n;
 }

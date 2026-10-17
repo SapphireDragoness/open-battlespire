@@ -7,7 +7,12 @@
 
 #define NEXT_HIDE 100      /* the model goes (0x48F86) */
 #define NEXT_RETURN 101    /* to the pending state, or idle / walking (0x48FD3) */
-#define NEXT_HOLD 102      /* stays while the bow is drawn, else loosed (0x48F13) */
+#define NEXT_HOLD 102      /* stays while a wall is ahead, else pushed out again (0x48F13) */
+
+/* A bow (0x49A92, 0x49DD0): its place and its arrow's, in tenths of a unit (0xEF810, 0xEF828). */
+static const float bow_offset[3] = {100.0f, -600.0f, -100.0f};
+#define BOW_ASIDE 0x538    /* the turn aside to nock an arrow */
+#define BOW_WAIT_MAX 10000 /* a longer wait is dropped (0x49ABD) */
 
 /* A curve: amplitude x sin(start + t x step), t running 0..1 over the state. */
 typedef struct curve {
@@ -41,7 +46,7 @@ static const state_def states[BS_HAND_STATES] = {
     {400, 6, 0, {{-150, 512, 1}, {0, 0, 0}, {300, 0, 800}}, {{0, 0}, {0, 0}, {0, 512}}},
     {300, 6, 0, {{-300, 256, 512}, {-100, 512, 1}, {100, 512, 1}}, {{0, 0}, {230, -460}, {512, 1}}},
     {300, 6, 0, {{-300, 256, 512}, {-100, 512, 1}, {100, 512, 1}}, {{230, -460}, {230, -460}, {256, 1}}},
-    {300, BS_HAND_HOLD, 0, {{-60, 512, 1}, {0, 0, 0}, {100, 512, 1}}, {{0, 420}, {0, 0}, {0, 0}}},
+    {300, BS_HAND_HELD_BACK, 0, {{-60, 512, 1}, {0, 0, 0}, {100, 512, 1}}, {{0, 420}, {0, 0}, {0, 0}}},
     {150, NEXT_RETURN, 0, {{-60, 512, 1}, {0, 0, 0}, {100, 512, 1}}, {{420, -420}, {0, 0}, {0, 0}}},
     {300, NEXT_HOLD, 0, {{-160, 0, 512}, {0, 0, 0}, {240, 512, 1}}, {{420, 1}, {512, 1}, {0, 0}}},
 };
@@ -103,17 +108,46 @@ void bs_hand_reset(bs_hand *h)
     h->windup_next = -1;
 }
 
-void bs_hand_equip(bs_hand *h, int weapon, uint32_t now_ms)
+static bool is_bow(int weapon)
+{
+    return weapon == 8 || weapon == 9 || weapon == 10;
+}
+
+void bs_hand_equip(bs_hand *h, int weapon, uint32_t now_ms, int32_t wait_ms)
 {
     int32_t keep[BS_HAND_STATES];
     memcpy(keep, h->swing_ms, sizeof keep);
     bs_hand_reset(h);
     memcpy(h->swing_ms, keep, sizeof keep);
+    h->last_ms = now_ms;
     if (weapon < 0 || weapon > 14)
         return;
     h->weapon = weapon;
     h->state = BS_HAND_RAISE;
     h->start = now_ms;
+    h->extra_ms = wait_ms;
+    h->bow = is_bow(weapon);
+}
+
+bs_hand_switch bs_hand_request_switch(bs_hand *h, int secondary, bool arrows_ready, uint32_t now_ms)
+{
+    /* A bow comes at once, if there are arrows for it (0x48C2A). */
+    if (is_bow(secondary))
+        return arrows_ready ? BS_SWITCH_NOW : BS_SWITCH_NO_ARROWS;
+    if (secondary < 0 || h->weapon < 0)
+        return BS_SWITCH_NOW;
+    /* Otherwise the weapon in hand is lowered first (0x48C8B). A bow in hand goes through the states for
+     * that, from rest. */
+    if (h->bow) {
+        h->bow = false;
+        h->state = BS_HAND_IDLE;
+        h->start = now_ms;
+        h->extra_ms = 0;
+        h->struck = false;
+        h->cut = false;
+    }
+    h->pending = BS_HAND_LOWER;
+    return BS_SWITCH_LOWERING;
 }
 
 bool bs_hand_can_swing(const bs_hand *h)
@@ -143,16 +177,82 @@ static void enter(bs_hand *h, int s, uint32_t now_ms)
     h->cut = false;
 }
 
-bool bs_hand_update(bs_hand *h, uint32_t now_ms, bool moving, bool drawing)
+/* A bow turning aside and back (0x49DD0): aside while a wall is ahead or to nock the next arrow, back
+ * when that's done. The turn aside is quicker with more Speed. */
+static void bow_turn(bs_hand *h, int32_t dt, const bs_hand_input *in)
 {
-    bool strike = false;
+    if (h->bow_angle == 0 && !in->blocked && h->bow_turn == 0 && !h->loosed)
+        return;
+    if (h->loosed)
+        h->bow_turn = -1;
+    else if (in->blocked && h->bow_turn >= 0)
+        h->bow_turn = -1;
+    else if (!in->blocked && h->bow_turn < 0)
+        h->bow_turn = 1;
+    else if (!in->blocked && h->bow_angle != 0)
+        h->bow_turn = 1;
+    if (h->bow_turn < 0 && (h->bow_angle >= BOW_ASIDE || h->bow_angle == 0)) {
+        int32_t per = 1000 - (in->speed - 50) * 10;
+        if (per < 1)
+            per = 1;
+        int32_t total = dt * 512 + h->bow_rest;
+        h->bow_angle -= total / per;
+        h->bow_rest = total % per;
+        /* From rest the game subtracts from 0 too, so a bow at rest jumps straight aside. */
+        if (h->bow_angle < BOW_ASIDE) {
+            h->bow_turn = h->loosed ? 1 : 0;
+            h->loosed = false;
+            h->bow_angle = BOW_ASIDE;
+            h->bow_rest = 0;
+        }
+    } else if (h->bow_turn > 0 && h->bow_angle >= BOW_ASIDE) {
+        int32_t total = dt * 512 + h->bow_rest;
+        h->bow_angle += total / 1000;
+        h->bow_rest = total % 1000;
+        if (h->bow_angle >= 0x800) {
+            h->bow_angle = 0;
+            h->bow_turn = 0;
+            h->bow_rest = 0;
+        }
+    }
+}
+
+static int bow_update(bs_hand *h, int32_t dt, const bs_hand_input *in)
+{
+    if (h->extra_ms) {
+        h->extra_ms -= dt;
+        if (h->extra_ms < 0 || h->extra_ms > BOW_WAIT_MAX)
+            h->extra_ms = 0;
+        else
+            return 0;
+    }
+    bow_turn(h, dt, in);
+    /* A press with the bow at rest looses the arrow (0x49C25). */
+    if (in->attack_pressed && h->bow_angle == 0 && !in->ethereal) {
+        h->loosed = true;
+        h->bow_angle = 0x7FF;
+        return BS_HAND_SHOOT;
+    }
+    return 0;
+}
+
+int bs_hand_update(bs_hand *h, uint32_t now_ms, const bs_hand_input *in)
+{
+    int out = 0;
+    int32_t dt = (int32_t)(now_ms - h->last_ms);
+    h->last_ms = now_ms;
     if (h->weapon < 0)
-        return false;
-    /* A bow drawn from idle or walking (0x48AE7). */
-    if (drawing && (h->state == BS_HAND_IDLE || h->state == BS_HAND_WALK))
-        enter(h, BS_HAND_DRAW, now_ms);
+        return 0;
+    if (h->bow)
+        return bow_update(h, dt < 0 ? 0 : dt, in);
+    /* A wall right ahead pulls the weapon back (0x48AE7). The game would also drop a switch waiting for
+     * the lowering; here it waits. */
+    if (in->blocked && (h->state == BS_HAND_IDLE || h->state == BS_HAND_WALK))
+        enter(h, BS_HAND_PULL_BACK, now_ms);
+    else if (in->blocked && h->pending != BS_HAND_LOWER)
+        h->pending = BS_HAND_PULL_BACK;
     for (int guard = 0; guard < 8; guard++) {
-        if (moving && h->state == BS_HAND_IDLE)
+        if (in->moving && h->state == BS_HAND_IDLE)
             enter(h, BS_HAND_WALK, now_ms);
         int32_t ms = state_ms(h, h->state) + h->extra_ms;
         int32_t elapsed = (int32_t)(now_ms - h->start);
@@ -160,7 +260,8 @@ bool bs_hand_update(bs_hand *h, uint32_t now_ms, bool moving, bool drawing)
          * longer than half a swing would skip it; here it can't be skipped. */
         if (!h->struck && ms / 2 < elapsed) {
             h->struck = true;
-            strike |= is_swing(h->state);
+            if (is_swing(h->state))
+                out |= BS_HAND_STRUCK;
         }
         if (!h->cut && ms > elapsed)
             break;
@@ -169,15 +270,21 @@ bool bs_hand_update(bs_hand *h, uint32_t now_ms, bool moving, bool drawing)
         int next = next_of(h, h->state);
         if (h->state == BS_HAND_WINDUP)
             h->windup_next = -1;
+        if (h->state == BS_HAND_LOWER) {
+            /* Lowered: the weapons are switched (0x48F05) and the new one raised. */
+            h->weapon = -1;
+            out |= BS_HAND_SWITCH;
+            break;
+        }
         if (next == NEXT_HOLD) {
-            if (drawing) {
-                /* Held at the end of the draw. */
+            if (in->blocked) {
+                /* Held back while the wall is there. */
                 h->start = now_ms - (uint32_t)ms + 1;
                 h->cut = false;
                 break;
             }
             h->pending = -1;
-            enter(h, BS_HAND_LOOSE, now_ms);
+            enter(h, BS_HAND_PUSH_OUT, now_ms);
         } else if (next == NEXT_HIDE) {
             h->weapon = -1;
             break;
@@ -187,15 +294,15 @@ bool bs_hand_update(bs_hand *h, uint32_t now_ms, bool moving, bool drawing)
             enter(h, h->pending, now_ms);
             h->pending = -1;
         } else {
-            enter(h, moving ? BS_HAND_WALK : BS_HAND_IDLE, now_ms);
+            enter(h, in->moving ? BS_HAND_WALK : BS_HAND_IDLE, now_ms);
         }
     }
-    return strike;
+    return out;
 }
 
 bool bs_hand_pose_at(const bs_hand *h, uint32_t now_ms, bs_hand_pose *out)
 {
-    if (h->weapon < 0 || h->state < 0 || h->state >= BS_HAND_STATES)
+    if (h->weapon < 0 || h->bow || h->state < 0 || h->state >= BS_HAND_STATES)
         return false;
     const state_def *d = &states[h->state];
     int32_t ms = state_ms(h, h->state) + h->extra_ms;
@@ -212,6 +319,20 @@ bool bs_hand_pose_at(const bs_hand *h, uint32_t now_ms, bs_hand_pose *out)
         out->angles[k] = turn_at(&d->angle[k], t, d->there_and_back != 0);
     }
     out->offset[1] -= 5.0f; /* 0x48B5E */
+    return true;
+}
+
+bool bs_hand_bow_pose(const bs_hand *h, int32_t pitch, bs_hand_pose *bow, bool *arrow)
+{
+    *arrow = false;
+    if (h->weapon < 0 || !h->bow || h->extra_ms > 0)
+        return false;
+    for (int k = 0; k < 3; k++)
+        bow->offset[k] = bow_offset[k] / 10.0f;
+    bow->angles[0] = -pitch & 0x7FF;
+    bow->angles[1] = h->bow_angle & 0x7FF;
+    bow->angles[2] = 0;
+    *arrow = !h->loosed;
     return true;
 }
 
@@ -267,6 +388,17 @@ void bs_hand_rotation(int32_t body_yaw, const int32_t angles[3], float m[9])
     angle_cs(angles[2], &c, &s);
     const float roll[9] = {c, -s, 0, s, c, 0, 0, 0, 1};
     apply(m, roll);
+}
+
+void bs_hand_bow_rotation(int32_t body_yaw, const int32_t angles[3], float m[9])
+{
+    float r[9], c, s;
+    yaw_of(-body_yaw, m);
+    angle_cs(angles[0], &c, &s);
+    const float pitch[9] = {1, 0, 0, 0, c, -s, 0, s, c};
+    apply(m, pitch);
+    yaw_of(angles[1], r);
+    apply(m, r);
 }
 
 void bs_hand_offset(int32_t body_yaw, const float offset[3], float out[3])

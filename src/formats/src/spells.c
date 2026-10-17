@@ -2,13 +2,39 @@
 
 #include <string.h>
 
-#define RECORD 0x77
+#define RECORD BS_SPELL_RECORD
 #define SCHOOLS 6                    /* the schools' skills, 10 bytes before the table (0xDA60A) */
 #define SCHOOLS_BEFORE 10
 
 static int32_t i32(const uint8_t *p)
 {
     return (int32_t)((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24);
+}
+
+void bs_spell_parse(const uint8_t r[BS_SPELL_RECORD], bs_spell *s)
+{
+    memset(s, 0, sizeof *s);
+    size_t n = 0;
+    while (n < sizeof s->name - 1 && r[n])
+        n++;
+    memcpy(s->name, r, n);
+    s->effect = r[0x20];
+    s->target = r[0x21];
+    s->icon = r[0x22];
+    s->duration_base = i32(r + 0x23);
+    s->duration_increase = i32(r + 0x27);
+    s->duration_step = i32(r + 0x2B);
+    s->magnitude_min = i32(r + 0x2F);
+    s->magnitude_max = i32(r + 0x33);
+    s->increase_min = i32(r + 0x37);
+    s->increase_max = i32(r + 0x3B);
+    s->magnitude_step = i32(r + 0x3F);
+    s->element = r[0x4D];
+    s->delivery = r[0x4E];
+    s->cost = i32(r + 0x5F);
+    s->school = i32(r + 0x67);
+    s->detonation = i32(r + 0x6B);
+    s->skill = -1;
 }
 
 bs_result bs_spells_read(const uint8_t *exe, size_t size, bs_spell out[BS_SPELL_COUNT])
@@ -22,28 +48,7 @@ bs_result bs_spells_read(const uint8_t *exe, size_t size, bs_spell out[BS_SPELL_
         for (uint32_t i = 0; i < BS_SPELL_COUNT; i++) {
             const uint8_t *r = t + i * RECORD;
             bs_spell *s = &out[i];
-            memset(s, 0, sizeof *s);
-            size_t n = 0;
-            while (n < sizeof s->name - 1 && r[n])
-                n++;
-            memcpy(s->name, r, n);
-            s->effect = r[0x20];
-            s->target = r[0x21];
-            s->icon = r[0x22];
-            s->duration_base = i32(r + 0x23);
-            s->duration_increase = i32(r + 0x27);
-            s->duration_step = i32(r + 0x2B);
-            s->magnitude_min = i32(r + 0x2F);
-            s->magnitude_max = i32(r + 0x33);
-            s->increase_min = i32(r + 0x37);
-            s->increase_max = i32(r + 0x3B);
-            s->magnitude_step = i32(r + 0x3F);
-            s->element = r[0x4D];
-            s->delivery = r[0x4E];
-            s->cost = i32(r + 0x5F);
-            s->school = i32(r + 0x67);
-            s->detonation = i32(r + 0x6B);
-            s->skill = -1;
+            bs_spell_parse(r, s);
             if (off >= SCHOOLS_BEFORE && s->school >= 0 && s->school < SCHOOLS && t[s->school - SCHOOLS_BEFORE] < 21)
                 s->skill = t[s->school - SCHOOLS_BEFORE];
             if (s->effect != i + 1)

@@ -156,13 +156,31 @@ void bs_overlay_image_frame(bs_overlay *o, const bs_bsi_image *img, uint32_t fra
     uint8_t lut[256][4];
     for (int i = 0; i < 256; i++)
         bs_bsi_pixel_rgb(img, (uint8_t)i, lut[i]);
-    for (uint32_t j = 0; j < img->height; j++)
-        for (uint32_t i = 0; i < img->width; i++) {
+    /* Only the part inside the clip. */
+    int x0 = img->x + dx, y0 = img->y + dy;
+    uint32_t i0 = o->clip[0] > x0 ? (uint32_t)(o->clip[0] - x0) : 0, j0 = o->clip[1] > y0 ? (uint32_t)(o->clip[1] - y0) : 0;
+    uint32_t i1 = img->width, j1 = img->height;
+    if (o->clip[2] - x0 < (int)i1)
+        i1 = o->clip[2] > x0 ? (uint32_t)(o->clip[2] - x0) : 0;
+    if (o->clip[3] - y0 < (int)j1)
+        j1 = o->clip[3] > y0 ? (uint32_t)(o->clip[3] - y0) : 0;
+    for (uint32_t j = j0; j < j1; j++)
+        for (uint32_t i = i0; i < i1; i++) {
             uint8_t p = px[(size_t)j * img->width + i];
             if (img->transparent && p == 0)
                 continue;
             put(o, img->x + dx + (int)i, img->y + dy + (int)j,
                 (uint32_t)lut[p][0] << 24 | (uint32_t)lut[p][1] << 16 | (uint32_t)lut[p][2] << 8 | 0xFF);
+        }
+    o->dirty = true;
+}
+
+void bs_overlay_rgb(bs_overlay *o, const uint8_t *rgb, int w, int h, int x, int y)
+{
+    for (int j = 0; j < h; j++)
+        for (int i = 0; i < w; i++) {
+            const uint8_t *p = rgb + ((size_t)j * (size_t)w + (size_t)i) * 3;
+            put(o, x + i, y + j, (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | 0xFFu);
         }
     o->dirty = true;
 }

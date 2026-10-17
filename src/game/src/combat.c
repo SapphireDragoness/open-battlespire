@@ -23,15 +23,22 @@ static int32_t percent(bs_rng *r)
     return bs_rng_range(r, 0, 99);
 }
 
+int bs_hit_location(bs_rng *r)
+{
+    int32_t roll = percent(r);
+    int loc = 0;
+    while (loc < BS_HIT_LOCATIONS - 1 && location_chance[loc] < roll)
+        roll -= location_chance[loc++];
+    return loc;
+}
+
 bs_melee bs_melee_roll(const bs_fighter *att, const bs_fighter *def, int32_t skill_mult, int32_t damage_mult,
                        bs_rng *r)
 {
     bs_melee m = {.outcome = BS_MELEE_MISS, .force = 1, .shield = def->shield};
 
-    int32_t roll = percent(r);
-    int loc = 0;
-    while (loc < BS_HIT_LOCATIONS - 1 && location_chance[loc] < roll)
-        roll -= location_chance[loc++];
+    int32_t roll;
+    int loc = bs_hit_location(r);
     m.location = loc;
 
     int32_t damage = bs_rng_range(r, att->damage_min, att->damage_max);

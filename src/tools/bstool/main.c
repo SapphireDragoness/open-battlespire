@@ -21,6 +21,7 @@ static const bstool_command commands[] = {
     { "fnt",     "[-o dir]",                   "print game fonts, export glyph sheets as PNG", cmd_fnt },
     { "model",   "[-o dir] [name...]",         "print 3D model summaries, or export models as glTF", cmd_model },
     { "level",   "[-o dir] [--tree] <name...>", "print BS6 level summaries, or export levels as glTF", cmd_level },
+    { "save",    "<SAVEn|dir> [--vars] [--hex id] [-o png] [--diff dir]", "print an original saved game's records and variables", cmd_save },
     { "le2elf",  "[exe] -o <out.elf>",         "convert GAME.EXE to ELF for Ghidra/objdump", cmd_le2elf },
 };
 

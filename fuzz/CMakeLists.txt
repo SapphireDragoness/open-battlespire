@@ -10,3 +10,18 @@ foreach(target lzss bsa bsi flic font rsc levels cdimage le model bs6 wav smk no
     target_link_options(fuzz_${target} PRIVATE -fsanitize=fuzzer)
     bs_configure_target(fuzz_${target})
 endforeach()
+
+add_executable(fuzz_talk fuzz_talk.c)
+target_link_libraries(fuzz_talk PRIVATE bs_game)
+target_link_options(fuzz_talk PRIVATE -fsanitize=fuzzer)
+bs_configure_target(fuzz_talk)
+
+add_executable(fuzz_save fuzz_save.c)
+target_link_libraries(fuzz_save PRIVATE bs_game)
+target_link_options(fuzz_save PRIVATE -fsanitize=fuzzer)
+bs_configure_target(fuzz_save)
+
+add_executable(fuzz_game_save fuzz_game_save.c)
+target_link_libraries(fuzz_game_save PRIVATE bs_game)
+target_link_options(fuzz_game_save PRIVATE -fsanitize=fuzzer)
+bs_configure_target(fuzz_game_save)

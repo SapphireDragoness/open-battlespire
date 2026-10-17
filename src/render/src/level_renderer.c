@@ -194,6 +194,8 @@ typedef struct gpu_sprite {
     uint32_t frames;
     uint32_t frame_ms;
     bool marker;
+    uint32_t flat;                   /* the level's flat it shows */
+    bool hidden;
 } gpu_sprite;
 
 typedef struct program {
@@ -532,6 +534,7 @@ bs_result bs_level_renderer_create(const bs_scene *scene, const bs_bs6_level *le
         int16_t ms = s->image->bhdr[BHDR_FRAME_MS];
         g->frame_ms = ms > 0 ? (uint32_t)ms : 100;
         g->marker = s->marker;
+        g->flat = i;
         r->sprite_count++;
     }
 
@@ -811,8 +814,13 @@ static void draw_scene(bs_level_renderer *r, const bs_camera *cam, const bs_rend
         glDrawArrays(GL_TRIANGLES, (GLint)b->first, (GLsizei)b->count);
     }
 
-    for (uint32_t k = 0; k < r->instance_count; k++)
-        draw_object_batches(r, r->instances[k].object, &r->instances[k].xform);
+    bool front = false;
+    for (uint32_t k = 0; k < r->instance_count; k++) {
+        if (r->instances[k].front)
+            front = true;
+        else
+            draw_object_batches(r, r->instances[k].object, &r->instances[k].xform);
+    }
     if (placed != -1 || r->instance_count)
         glUniformMatrix4fv(r->geometry.model, 1, GL_FALSE, identity4);
     if (r->water_vao) {
@@ -833,7 +841,7 @@ static void draw_scene(bs_level_renderer *r, const bs_camera *cam, const bs_rend
         glBindVertexArray(r->quad_vao);
         for (uint32_t i = 0; i < r->sprite_count; i++) {
             const gpu_sprite *g = &r->sprites[i];
-            if (g->marker ? !s->markers : !s->sprites)
+            if (g->hidden || (g->marker ? !s->markers : !s->sprites))
                 continue;
             uint32_t frame = (uint32_t)(time * 1000.0 / g->frame_ms) % g->frames;
             glUniform3f(r->sprite.center, g->pos[0], g->pos[1], g->pos[2]);
@@ -845,7 +853,47 @@ static void draw_scene(bs_level_renderer *r, const bs_camera *cam, const bs_rend
         for (uint32_t i = 0; s->sprites && i < r->dyn_count; i++)
             draw_dynamic_sprite(r, &r->dyn[i]);
     }
+    if (front) {
+        /* Over everything drawn so far, but still hiding its own back faces. */
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        if (s->cull)
+            glEnable(GL_CULL_FACE);
+        set_shading(&r->geometry, r, cam, s, mvp);
+        glBindVertexArray(r->vao);
+        for (uint32_t k = 0; k < r->instance_count; k++)
+            if (r->instances[k].front)
+                draw_object_batches(r, r->instances[k].object, &r->instances[k].xform);
+        glUniformMatrix4fv(r->geometry.model, 1, GL_FALSE, identity4);
+    }
     glBindVertexArray(0);
+}
+
+/* Draws at the classic size and scales it into the 640x480 screen's rectangle (x, y, w, h), letterboxed in
+ * the window. */
+static void draw_classic(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int width,
+                         int height, double time, int sx, int sy, int sw, int sh)
+{
+    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    draw_scene(r, cam, s, CLASSIC_W, CLASSIC_H, time);
+
+    /* The screen in the window, keeping 4:3. */
+    int w = width, h = width * CLASSIC_H / CLASSIC_W;
+    if (h > height) {
+        h = height;
+        w = height * CLASSIC_W / CLASSIC_H;
+    }
+    int x = (width - w) / 2, y = (height - h) / 2;
+    int x0 = x + sx * w / 640, x1 = x + (sx + sw) * w / 640;
+    int y1 = y + h - sy * h / 480, y0 = y + h - (sy + sh) * h / 480; /* GL counts from the bottom */
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, width, height);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glBlitFramebuffer(0, 0, CLASSIC_W, CLASSIC_H, x0, y0, x1, y1, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void bs_level_renderer_draw(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int width,
@@ -858,24 +906,15 @@ void bs_level_renderer_draw(bs_level_renderer *r, const bs_camera *cam, const bs
         draw_scene(r, cam, s, width, height, time);
         return;
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
-    draw_scene(r, cam, s, CLASSIC_W, CLASSIC_H, time);
+    draw_classic(r, cam, s, width, height, time, 0, 0, 640, 480);
+}
 
-    /* Scale up to the window, keeping 4:3. */
-    int w = width, h = width * CLASSIC_H / CLASSIC_W;
-    if (h > height) {
-        h = height;
-        w = height * CLASSIC_W / CLASSIC_H;
-    }
-    int x = (width - w) / 2, y = (height - h) / 2;
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, width, height);
-    glClearColor(0, 0, 0, 1);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-    glBlitFramebuffer(0, 0, CLASSIC_W, CLASSIC_H, x, y, x + w, y + h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+void bs_level_renderer_draw_inset(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int width,
+                                  int height, double time, int x, int y, int w, int h)
+{
+    if (r->classic_filters != s->classic)
+        apply_filters(r, s->classic);
+    draw_classic(r, cam, s, width, height, time, x, y, w, h);
 }
 
 bs_result bs_level_renderer_set_water(bs_level_renderer *r, const bs_bsi_image *image, float height)
@@ -938,6 +977,13 @@ void bs_level_renderer_show(bs_level_renderer *r, uint32_t object, bool visible)
 {
     if (object < r->object_count)
         r->hidden[object] = !visible;
+}
+
+void bs_level_renderer_show_flat(bs_level_renderer *r, uint32_t flat, bool visible)
+{
+    for (uint32_t i = 0; i < r->sprite_count; i++)
+        if (r->sprites[i].flat == flat)
+            r->sprites[i].hidden = !visible;
 }
 
 bs_result bs_level_renderer_set_instances(bs_level_renderer *r, const bs_level_instance *inst, uint32_t count)

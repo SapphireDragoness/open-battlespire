@@ -82,6 +82,47 @@ int main(int argc, char **argv)
     static const char book[] = "[[Heading]]\r\n\r\nHello %PCF, I am %APF.^Next$line\r\nmore text here";
     err |= write_seed(root, "book", "small", book, sizeof book - 1);
 
+    /* A save tree: the version, a player, an item in it, the end, then two idle controllers and none running. */
+    {
+        static uint8_t tree[4 + 2 * 4 + 0x3D * 2 + 0x317 + 0x2F3 + 4 + 2 + 4];
+        memset(tree, 0, sizeof tree);
+        size_t at = 0;
+        tree[1] = 1; /* 0x100 */
+        at += 4;
+        const uint32_t sizes[2] = {0x3D + 0x317, 0x3D + 0x2F3};
+        for (int r = 0; r < 2; r++) {
+            uint8_t *p = tree + at;
+            p[0] = (uint8_t)sizes[r];
+            p[1] = (uint8_t)(sizes[r] >> 8);
+            p[4] = r == 0 ? 3 : 2;
+            p[4 + 0x1D] = r == 0 ? 0x50 : 0x11;     /* ids 50000 and 10001 */
+            p[4 + 0x1E] = r == 0 ? 0xC3 : 0x27;
+            if (r == 1) {
+                p[4 + 0x39] = 0x50;                 /* in the player */
+                p[4 + 0x3A] = 0xC3;
+            }
+            at += 4 + sizes[r];
+        }
+        at += 4 + 2 + 4;
+        err |= write_seed(root, "save", "tree", tree, at);
+    }
+    {
+        /* One of our saves, small: a player, an item in a sack, a monster holding one, an automap. */
+        static const char text[] = "[save]\nversion = 1\nname = \"seed #1\"\nlevel = l1.bs6\nlevel_number = 1\n"
+                                   "clock = 1000\n[player]\nname = A\nstrength = 50\nhotkeys = 21 0 0 0 0 0 0 0\n"
+                                   "[spell]\nnumber = 21\nicon = 5\n[item]\nid = 1\nbase = 16\nwhere = carried\n"
+                                   "[item]\nid = 2\nbase = 22\nquantity = 9\nwhere = item 1\n[monster]\nid = 577\n"
+                                   "creature = 2\npos = 1 2 3\n[item]\nid = 3\nbase = 31\nwhere = monster 577\n"
+                                   "[automap]\nmap = 0\nrow = x.......................................\n"
+                                   "[variables]\nPCMale = 1\n@123 = 2\n[locals]\nid = 577\nGotgem = 1\n";
+        err |= write_seed(root, "game_save", "small", (const uint8_t *)text, sizeof text - 1);
+    }
+
+    static const char talk[] = "\ttalkcheck\r\n\t&Mad\tXX1A31\r\n\t\r\n\ttalktable\r\n\tFirst\tXX1A21\r\n"
+                               "\tXX1A21\tHello.\tXX1A2A\tTRUE\t\t\tHi.\t01-50: XX1A31 51-00: END\tPUT 21_033\t&Mad\r\n"
+                               "\tXX1A31\t[[It glares.]]\tXX1A3A\tnot &Mad\t\t\tBye.\tEND\tMonsterAttack\r\n";
+    err |= write_seed(root, "talk", "small", talk, sizeof talk - 1);
+
     static const uint8_t lz[] = { 0xFF, 'v', '2', '.', '7', 0, 0, 0, 0, 0x01, 'x', 0xEE, 0xFF, 0x00, 0x00, 0x02 };
     err |= write_seed(root, "lzss", "mixed", lz, sizeof lz);
     return err;

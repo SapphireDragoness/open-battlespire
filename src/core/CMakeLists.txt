@@ -2,6 +2,7 @@ add_library(bs_core STATIC
     src/arena.c
     src/cdimage.c
     src/fs.c
+    src/ini.c
     src/install.c
     src/log.c
     src/png.c

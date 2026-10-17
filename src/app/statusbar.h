@@ -32,11 +32,15 @@ typedef enum statusbar_button {
     STATUSBAR_BUTTONS,
 } statusbar_button;
 
+#define STATUSBAR_FACE_LAYERS 32
+
 typedef struct statusbar {
     const bs_bsi *panel;                       /* the bar, its left end, the four buttons */
     const bs_bsi_image *health, *spell_points; /* 32 frames, full to empty */
     const bs_bsi_image *compass, *compass_full;  /* 36 frames, 10 degrees apart */
-    const bs_bsi_image *face[4];               /* body, eyes, mouth, hair, as the inventory composes them */
+    const bs_bsi_image *face[STATUSBAR_FACE_LAYERS]; /* the paper doll's images, bottom first */
+    const bs_bsi_image *face_frame;            /* fram00.bsi, over the face */
+    int face_count;
     int face_dx, face_dy;                      /* the face's offset into the bar */
     bool full_view;
 } statusbar;
@@ -44,8 +48,9 @@ typedef struct statusbar {
 /* The bar's pictures. */
 void statusbar_load(statusbar *s, bs_assets *a);
 
-/* The face: the inventory's body, eyes, mouth and hair (sex 'f' or 'm', race "br" ...). */
-void statusbar_set_face(statusbar *s, bs_assets *a, char sex, const char *race, int hair, int eyes, int mouth);
+/* The face: the paper doll's images, bottom first (inventory_doll_images), cut out around its eyes
+ * image (0x5678A): what the character wears shows too, a helmet instead of the hair. */
+void statusbar_set_face(statusbar *s, const bs_bsi_image *const *layers, int count, const bs_bsi_image *eyes);
 
 /* Draws the bar (or the full view's vials and compass) into the overlay; yaw is the player's
  * (2048 a turn). */

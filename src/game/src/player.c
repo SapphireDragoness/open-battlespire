@@ -19,6 +19,22 @@ static const float body[3][2] = {{34, 7}, {41, 11}, {65, 16}};
 #define GROUND_RADIUS 16.0f     /* the ground probe at the feet (0xED6C0) */
 #define CHARGE_STANDING 2000    /* the longest jump charge (0x40914) */
 #define CHARGE_MOVING 1000
+/* Water (0x3FB10, 0x3FDA0, 0x2C299). */
+#define SWIM_DEPTH 50.0f        /* the feet this far below the surface swim; a fall into water stops here */
+#define SWIM_VERTICAL 100.0f    /* rising and sinking, units/s (0x3FECB) */
+#define SWIM_PROBE_UP 110.0f    /* a swimmer at the surface looks for floors this far above the feet (0x2C64C) */
+#define SWIM_AHEAD 35.0f        /* a blocked swimmer's move is tried this much further on (0x40215) */
+/* The Swimming skill adds half itself to the forward step of each frame (0x3F5E2), and the game splits a frame
+ * into steps of about 15 units (0x3FCF0), each with the bonus: the speed depends on the frame rate. The game
+ * ran at about 20 frames a second; that is assumed here. */
+#define SWIM_FRAME_MS 50
+#define FRAME_STEP 15
+#define BALLOON_VERTICAL 160.0f /* (0x3FFAC) */
+
+/* A boat's spheres (0xED77E): 10 above the feet, 90 ahead and behind (radius 35) and in the middle (20). The
+ * balloon's (0xED7C8): its envelope, radius 700 centred 700 up, and its basket, 50 at 50 up. */
+static const float boat_body[3][3] = {{90, 10, 35}, {0, 10, 20}, {-90, 10, 35}};
+static const float balloon_body[2][2] = {{700, 700}, {50, 50}};
 
 void bs_player_init(bs_player *p, const float feet[3], float yaw)
 {
@@ -104,11 +120,90 @@ static bool ground_touch(const bs_collision_world *w, const float at[3], float y
     return bs_collision_sphere(w, c, GROUND_RADIUS, h, 1) > 0;
 }
 
+/* The forward speed in water (0x3F4BD in the steps of 0x3FCF0): fwd is base + 128 in units/s. */
+static float swim_forward(int32_t fwd, bool sneak, int32_t skill)
+{
+    int32_t d = fwd * SWIM_FRAME_MS / 1000;
+    if (sneak)
+        d >>= 1;
+    d = (d >> 1) + skill / 2;
+    if (d < FRAME_STEP)
+        return (float)d * 1000.0f / SWIM_FRAME_MS;
+    int32_t step = (int32_t)((float)SWIM_FRAME_MS * ((float)FRAME_STEP / (float)d));
+    if (step < 1)
+        step = 1;
+    int32_t ds = fwd * step / 1000;
+    if (sneak)
+        ds >>= 1;
+    ds = (ds >> 1) + skill / 2;
+    int32_t n = (SWIM_FRAME_MS + step - 1) / step;
+    return (float)(n * ds) * 1000.0f / SWIM_FRAME_MS;
+}
+
+/* Whether the boat or balloon at feet position f touches anything (0x2C459, 0x2C4E5). */
+static bool ride_blocked(const bs_collision_world *w, const bs_player_input *in, const float f[3])
+{
+    bs_collision_hit h[1];
+    if (in->ride == BS_RIDE_BOAT) {
+        float sx = sinf(in->ride_heading), cz = cosf(in->ride_heading);
+        for (int k = 0; k < 3; k++) {
+            float c[3] = {f[0] + sx * boat_body[k][0], f[1] - boat_body[k][1], f[2] + cz * boat_body[k][0]};
+            if (bs_collision_sphere(w, c, boat_body[k][2], h, 1))
+                return true;
+        }
+        return false;
+    }
+    for (int k = 0; k < 2; k++) {
+        float c[3] = {f[0], f[1] - balloon_body[k][0], f[2]};
+        if (bs_collision_sphere(w, c, balloon_body[k][1], h, 1))
+            return true;
+    }
+    return false;
+}
+
+/* The floor below (x, z): from up above y to 200 below. Returns its height in *fy. */
+static bool floor_at(const bs_collision_world *w, float x, float y, float z, float up, float *fy, int32_t *object)
+{
+    float from[3] = {x, y - up, z}, to[3] = {x, y + FLOOR_PROBE_DOWN, z}, t;
+    *object = -1;
+    if (!bs_collision_segment(w, from, to, &t, object))
+        return false;
+    *fy = from[1] + t * (up + FLOOR_PROBE_DOWN);
+    return true;
+}
+
+/* A swimmer that can't go on is tried 35 further on before sliding, finding a floor from higher up: onto a
+ * ledge out of the water (0x2C8A7). Returns whether it climbed. */
+static bool climb(bs_player *p, const bs_collision_world *w, float dx, float dz, float y, float probe_up,
+                  int32_t touch, bs_player_events *ev)
+{
+    float len = sqrtf(dx * dx + dz * dz), fy;
+    int32_t ob, hit_ob;
+    bs_collision_hit hits[1];
+    float ahead[3] = {p->pos[0] + dx / len * (len + SWIM_AHEAD), 0, p->pos[2] + dz / len * (len + SWIM_AHEAD)};
+    if (!floor_at(w, ahead[0], y, ahead[2], probe_up, &fy, &ob) || fy > y)
+        return false;
+    ahead[1] = fy;
+    if (body_hits(w, ahead, hits, 1, &hit_ob) > 0)
+        return false;
+    memcpy(p->pos, ahead, sizeof ahead);
+    p->moved = true;
+    p->swimming = false;
+    p->on_ground = true;
+    p->vy = 0;
+    ev->floor_changed = ob != p->floor_object;
+    p->floor_object = ob;
+    ev->touch_changed = touch != p->touch_object;
+    p->touch_object = touch;
+    return true;
+}
+
 void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_world *w, const bs_player_input *in,
                     uint32_t dt_ms, bs_player_events *ev)
 {
     memset(ev, 0, sizeof *ev);
     float dt = (float)dt_ms / 1000.0f;
+    bool riding = in->ride != BS_RIDE_NONE;
 
     /* Eye height: up at 74 units/s (0x41393); ducking down at the same rate (the game's isn't known). */
     float rate = (float)dt_ms * 37.0f / 500.0f;
@@ -130,8 +225,15 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
         back_speed *= 0.5f;
         side_speed *= 0.5f;
     }
+    if (p->swimming || in->ride == BS_RIDE_BALLOON) {
+        /* Swimming and the balloon halve them again; in water the Swimming skill adds to going forward. */
+        fwd_speed = p->swimming && in->walk_speed <= 0 ? swim_forward(base + 128, in->sneak, s->swim_skill)
+                                                       : fwd_speed * 0.5f;
+        back_speed *= 0.5f;
+        side_speed *= 0.5f;
+    }
 
-    /* Jumps (0x40860, 0x40DF9): hold to charge, release to jump. */
+    /* Jumps (0x40860, 0x40DF9): hold to charge, release to jump. Not in water, nor riding. */
     int32_t j = (s->speed + s->strength) / 2 + 120;
     j += j / 2 * s->jump_skill / 100;
     if (in->run)
@@ -142,7 +244,8 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
     if (in->run)
         js = js * 310 / 256;
     uint32_t charge_max = p->moved ? CHARGE_MOVING : CHARGE_STANDING;
-    if (in->jump && p->on_ground) {
+    bool can_jump = p->on_ground && !p->swimming && !riding;
+    if (in->jump && can_jump) {
         if (!p->charging) {
             p->charging = true;
             p->charge_ms = 0;
@@ -155,7 +258,7 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
         p->jump_distance = (float)(d < dmin ? dmin : d);
     } else if (p->charging) {
         p->charging = false;
-        if (p->on_ground) {
+        if (can_jump) {
             p->vy = -j * 256;
             p->jumping = true;
             p->on_ground = false;
@@ -165,13 +268,17 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
             p->jump_yaw = p->yaw;
         }
     }
+    if (p->swimming)
+        p->jumping = false; /* 0x4036B */
 
-    /* Horizontal movement: walking on the ground, the jump's speed in the air, else nothing. */
+    /* Horizontal movement: walking on the ground, in water or riding (a boat goes its own way and has no
+     * sideways step); the jump's speed in the air, else nothing. */
     float dx = 0, dz = 0;
-    if (p->on_ground) {
+    if (p->on_ground || p->swimming || riding) {
         float vf = in->forward > 0 ? in->forward * fwd_speed : in->forward * back_speed;
-        float vs = in->strafe * side_speed;
-        float sy = sinf(p->yaw), cy = cosf(p->yaw);
+        float vs = in->ride == BS_RIDE_BOAT ? 0.0f : in->strafe * side_speed;
+        float heading = in->ride == BS_RIDE_BOAT ? in->ride_heading : p->yaw;
+        float sy = sinf(heading), cy = cosf(heading);
         dx = (sy * vf + cy * vs) * dt;
         dz = (cy * vf - sy * vs) * dt;
     } else if (p->jumping) {
@@ -179,12 +286,85 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
         dz = cosf(p->jump_yaw) * p->jump_speed * dt;
     }
 
+    /* Up and down (0x3FE57, 0x3FF8D): a swimmer rises to the surface or sinks (carrying too much, it sinks
+     * anyway) until it stands on something; the balloon rises, and sinks while above the water. */
+    float y = p->pos[1];
+    if (p->swimming) {
+        if (!in->heavy && in->up) {
+            if (y > in->water_y + SWIM_DEPTH)
+                y -= SWIM_VERTICAL * dt;
+        } else if ((in->heavy || in->down) && !p->on_ground &&
+                   (in->dive_max <= 0 || y < in->water_y + in->dive_max)) {
+            y += SWIM_VERTICAL * dt;
+        }
+    }
+    if (in->ride == BS_RIDE_BALLOON) {
+        if (in->up)
+            y -= BALLOON_VERTICAL * dt;
+        else if (in->down && !p->on_ground && (!in->water || y < in->water_y))
+            y += BALLOON_VERTICAL * dt;
+    }
+
+    /* Gravity and the water (0x3FA97, 0x3FB10): no falling in water; falling into it stops 50 below the
+     * surface. Riding, nothing falls. */
+    float dy = 0;
+    bool in_water = false;
+    if (!p->swimming) {
+        p->vy += (int32_t)((int64_t)GRAVITY * dt_ms / 1000);
+        if (p->vy > FALL_MAX)
+            p->vy = FALL_MAX;
+        if (in->slow_fall && p->vy > SLOW_FALL_MAX) {
+            if (p->vy - (int32_t)((int64_t)GRAVITY * dt_ms / 1000) < SLOW_FALL_MAX)
+                ev->slow_fall = true; /* 0x3FBE9 */
+            p->vy = SLOW_FALL_MAX; /* 0x3FBC2 */
+        }
+        /* The game truncates each frame's move to whole units, which at high
+         * frame rates would slow falls and jumps; here the fraction is kept. */
+        dy = (float)p->vy * dt / 256.0f;
+    }
+    if (in->water && y >= in->water_y + SWIM_DEPTH) {
+        if (!p->swimming) {
+            dy = 0;
+            y = in->water_y + SWIM_DEPTH;
+            ev->splashed = true;
+        }
+        in_water = true;
+    }
+    if (in_water || riding) {
+        p->vy = 0;
+        if (riding)
+            dy = 0;
+    }
+    bool was_swimming = p->swimming;
+    p->swimming = in_water && !riding;
+    float newy = y + dy;
+
+    /* Riding: the boat's or balloon's spheres at the new place; touching anything, nothing moves (0x2C4C5). */
+    if (riding) {
+        float to[3] = {p->pos[0] + dx, newy, p->pos[2] + dz};
+        if (ride_blocked(w, in, to)) {
+            ev->ride_blocked = true;
+            memcpy(to, p->pos, sizeof to);
+        }
+        p->moved = to[0] != p->pos[0] || to[2] != p->pos[2];
+        memcpy(p->pos, to, sizeof to);
+        p->on_ground = p->jumping = p->charging = false;
+        ev->floor_changed = p->floor_object != -1;
+        ev->touch_changed = p->touch_object != -1;
+        p->floor_object = p->touch_object = -1;
+        return;
+    }
+
     float target[3] = {p->pos[0] + dx, p->pos[1], p->pos[2] + dz};
     int32_t touch = -1;
+    float probe_up = was_swimming && fabsf(p->pos[1] - (in->water_y + SWIM_DEPTH)) < 0.5f ? SWIM_PROBE_UP
+                                                                                       : FLOOR_PROBE_UP;
     if (dx != 0 || dz != 0) {
         float move[3] = {dx, 0, dz}, wall[3];
         bool ray;
         float against = wall_test(w, p->pos, target, move, wall, &ray, &touch);
+        if ((against < 0 || ray) && p->swimming && climb(p, w, dx, dz, newy, probe_up, touch, ev))
+            return;
         if (against < 0) {
             /* Slide along the wall most against the movement, then try once more (0x2C932). */
             float slid[3] = {dx - wall[0] * against, 0, dz - wall[2] * against};
@@ -199,20 +379,7 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
         }
     }
 
-    /* Vertical movement under gravity (0x3FA97). */
-    float dy = 0;
-    if (!p->on_ground) {
-        p->vy += (int32_t)((int64_t)GRAVITY * dt_ms / 1000);
-        if (p->vy > FALL_MAX)
-            p->vy = FALL_MAX;
-        if (in->slow_fall && p->vy > SLOW_FALL_MAX)
-            p->vy = SLOW_FALL_MAX; /* 0x3FBC2 */
-        /* The game truncates each frame's move to whole units, which at high
-         * frame rates would slow falls and jumps; here the fraction is kept. */
-        dy = (float)p->vy * dt / 256.0f;
-    }
-    float newy = p->pos[1] + dy;
-    if (dy < 0) {
+    if (newy < p->pos[1]) {
         bs_collision_hit hits[MAX_HITS];
         int32_t ob;
         float up[3] = {target[0], newy, target[2]};
@@ -222,19 +389,29 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
         }
     }
 
-    /* The floor (0x2C55A): from 32 above the feet to 200 below. */
-    float from[3] = {target[0], newy - FLOOR_PROBE_UP, target[2]}, to[3] = {target[0], newy + FLOOR_PROBE_DOWN, target[2]};
-    float t;
+    /* The floor (0x2C55A): from 32 above the feet (110 for a swimmer at the surface) to 200 below. */
+    float fy = 0;
     int32_t floor_ob = -1;
-    bool floor = bs_collision_segment(w, from, to, &t, &floor_ob);
-    float fy = from[1] + t * (FLOOR_PROBE_UP + FLOOR_PROBE_DOWN);
+    bool floor = floor_at(w, target[0], newy, target[2], probe_up, &fy, &floor_ob);
+    if (floor && fy < newy - FLOOR_PROBE_UP) {
+        /* Only a swimmer looks this high: the body must fit there (the game's head room test, 0x40334). */
+        bs_collision_hit hits[1];
+        int32_t ob;
+        float at[3] = {target[0], fy, target[2]};
+        if (body_hits(w, at, hits, 1, &ob) > 0)
+            floor = false;
+    }
     bool was_on_ground = p->on_ground;
-    /* Walking, a floor up to 25 below is stood on; during a jump the game
-     * doesn't snap (0x2C801), so a jump lands when the feet reach the floor. */
-    float snap = p->jumping ? 0.0f : FLOOR_SNAP;
-    if (p->vy >= 0 && floor && fy - newy < snap + (p->jumping ? 0.001f : 0.0f)) {
+    /* Walking, a floor up to 25 below is stood on. During a jump the game doesn't snap (0x2C801), so a jump
+     * lands when the feet reach the floor; nor in water, nor over deep water from above it (a floor more than
+     * 50 below the surface, 0x2C67C): only floors the feet reach count. */
+    bool deep = in->water && !p->swimming && p->pos[1] <= in->water_y + SWIM_DEPTH &&
+                fy - SWIM_DEPTH > in->water_y;
+    bool strict = p->jumping || p->swimming || deep;
+    float snap = strict ? 0.001f : FLOOR_SNAP;
+    if (p->vy >= 0 && floor && fy - newy < snap) {
         newy = fy;
-        if (!was_on_ground) {
+        if (!was_on_ground && !p->swimming) {
             ev->landed = true;
             ev->fall_speed = p->vy;
         }

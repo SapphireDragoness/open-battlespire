@@ -68,17 +68,24 @@ uint32_t inventory_models(const bs_item_tables *t, char names[INVENTORY_MODELS][
     return INVENTORY_MODELS;
 }
 
-uint32_t inventory_item_object(const inventory_env *env, uint32_t item)
+/* The model object of an item, or UINT32_MAX. */
+static uint32_t model_object(const inventory_env *env, const bs_item *it)
 {
-    if (item >= env->items->count || env->model_first == UINT32_MAX)
+    if (env->model_first == UINT32_MAX || !env->renderer)
         return UINT32_MAX;
-    const bs_item *it = &env->items->items[item].item;
     char name[16];
     bs_item_model_name(env->db->tables, it->base, it->magic ? it->magic : it->number, name);
     if (strncmp(name, "sigil", 5) == 0 && name[5] >= 'a' && name[5] <= 'z')
         return env->model_first + BS_ITEM_MODEL_COUNT + (uint32_t)(name[5] - 'a');
     uint16_t image = env->db->tables->bases[it->base].image;
     return name[0] && image < BS_ITEM_MODEL_COUNT ? env->model_first + image : UINT32_MAX;
+}
+
+uint32_t inventory_item_object(const inventory_env *env, uint32_t item)
+{
+    if (item >= env->items->count)
+        return UINT32_MAX;
+    return model_object(env, &env->items->items[item].item);
 }
 
 static void clamp_scroll(inventory *inv, const inventory_env *env);
@@ -232,7 +239,8 @@ static int picture_order(const char *picture)
 }
 
 /* The doll's images, bottom first (0x56510): body, eyes, mouth, hair (not under a helmet), the
- * worn items by the number in their picture's name, the frame. */
+ * worn items by the number in their picture's name. (The frame fram00.bsi the game composes with them
+ * goes round the bar's face, 0x567B0, not on the doll.) */
 static int doll_layers(const inventory *inv, const inventory_env *env, doll_layer *out)
 {
     int n = 0;
@@ -252,7 +260,7 @@ static int doll_layers(const inventory *inv, const inventory_env *env, doll_laye
         out[n++] = (doll_layer){env->image(env->ctx, name), UINT32_MAX};
     }
     int first = n;
-    for (uint32_t i = 0; i < env->items->count && n < DOLL_LAYERS - 1; i++) {
+    for (uint32_t i = 0; i < env->items->count && n < DOLL_LAYERS; i++) {
         const bs_world_item *w = &env->items->items[i];
         if (!w->equipped || i == inv->held || !w->item.picture[0] || w->place.where == BS_ITEM_GONE ||
             !bs_items_place_carried(env->items, w->place))
@@ -268,8 +276,30 @@ static int doll_layers(const inventory *inv, const inventory_env *env, doll_laye
         }
         out[k] = l;
     }
-    out[n++] = (doll_layer){env->image(env->ctx, "fram00.bsi"), UINT32_MAX};
     return n;
+}
+
+const bs_bsi_image *inventory_doll_eyes(const inventory_env *env)
+{
+    char name[32];
+    if (!env->image)
+        return NULL;
+    snprintf(name, sizeof name, "%c%sey%03d.bsi", env->female ? 'f' : 'm', env->race, env->eyes);
+    return env->image(env->ctx, name);
+}
+
+int inventory_doll_images(const inventory_env *env, const bs_bsi_image **out, int max)
+{
+    inventory none;
+    memset(&none, 0, sizeof none);
+    none.held = UINT32_MAX;
+    doll_layer l[DOLL_LAYERS];
+    int n = doll_layers(&none, env, l);
+    int k = 0;
+    for (int i = 0; i < n && k < max; i++)
+        if (l[i].img)
+            out[k++] = l[i].img;
+    return k;
 }
 
 /* The worn item drawn at a doll point: the topmost whose image isn't transparent there (0x56CFA). */
@@ -675,6 +705,11 @@ static void info_lines(const inventory_env *env, const bs_item *it, char *l1, ch
     }
 }
 
+void inventory_item_lines(const inventory_env *env, const bs_item *it, char *l1, char *l2, size_t cap)
+{
+    info_lines(env, it, l1, l2, cap);
+}
+
 /* Windows-1252 to the fonts' code page 437, where there is an equivalent. */
 static void cp437(const char *in, char *out, size_t cap)
 {
@@ -693,13 +728,12 @@ static void cp437(const char *in, char *out, size_t cap)
 }
 
 /* An item's model spinning in a 640x480 rectangle (0x51030). */
-static void draw_item(const inventory_env *env, uint32_t item, int x0, int y0, int x1, int y1, int ww, int wh,
-                      uint64_t ms)
+void inventory_draw_model(const inventory_env *env, const bs_item *it, int x0, int y0, int x1, int y1, int ww, int wh,
+                          uint64_t ms)
 {
-    uint32_t ob = inventory_item_object(env, item);
+    uint32_t ob = model_object(env, it);
     if (ob == UINT32_MAX)
         return;
-    const bs_item *it = &env->items->items[item].item;
     float r = env->model_radius[ob - env->model_first];
     if (r <= 0.0f)
         return;
@@ -715,6 +749,13 @@ static void draw_item(const inventory_env *env, uint32_t item, int x0, int y0, i
     int x = ox + (int)((float)x0 * s), y = oy + (int)((float)y0 * s);
     int w = (int)((float)(x1 - x0) * s), h = (int)((float)(y1 - y0) * s);
     bs_level_renderer_draw_object(env->renderer, ob, angles, offset, SLOT_SX, SLOT_SY, x, y, w, h, wh);
+}
+
+static void draw_item(const inventory_env *env, uint32_t item, int x0, int y0, int x1, int y1, int ww, int wh,
+                      uint64_t ms)
+{
+    if (item < env->items->count)
+        inventory_draw_model(env, &env->items->items[item].item, x0, y0, x1, y1, ww, wh, ms);
 }
 
 static void draw_book(inventory *inv, const inventory_env *env)

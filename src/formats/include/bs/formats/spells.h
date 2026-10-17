@@ -112,6 +112,11 @@ typedef struct bs_spell {
 /* The players' spell records are the same, changed by the spell book: icon, element, delivery and
  * detonation are the caster's choices. */
 
+#define BS_SPELL_RECORD 0x77
+
+/* One spell record (the table's, or a spell object's body in a class or save file); skill is left -1. */
+void bs_spell_parse(const uint8_t r[BS_SPELL_RECORD], bs_spell *s);
+
 /* Reads the 31 spells from GAME.EXE's bytes. BS_ERR_NOT_FOUND if they aren't there. */
 bs_result bs_spells_read(const uint8_t *exe, size_t size, bs_spell out[BS_SPELL_COUNT]);
 

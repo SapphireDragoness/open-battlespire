@@ -3,6 +3,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "bs/game/levelling.h"
+
 /* RE references are GAME.EXE addresses; see docs/formats/spells.md. */
 
 #define CAST_HEIGHT 50.0f        /* spells start this far above the caster's feet (0x27BF1) */
@@ -362,6 +364,7 @@ static void apply(bs_magic_state *mg, const bs_magic_world *w, bs_spell_cast *c,
         mg->hand_playing = true;
         mg->hand_start = w->now_ms;
         mg->hand_element = c->spell.element;
+        bs_skill_used(w->character, bs_school_skill(c->spell.school), 1); /* (0x29713) */
     } else {
         float at[3] = {from[0], from[1] - CAST_HEIGHT, from[2]};
         add_burst(mg, w, at, -1);
@@ -567,6 +570,8 @@ static void launch(bs_magic_state *mg, const bs_magic_world *w, bs_spell_cast *c
             mi = &mg->missiles[i];
     if (!mi)
         return;
+    if (c->owner == BS_MAGIC_PLAYER)
+        bs_skill_used(w->character, bs_school_skill(c->spell.school), 1); /* (0x2752B) */
     memset(mi, 0, sizeof *mi);
     mi->cast = *c;
     mi->live = true;

@@ -108,7 +108,7 @@ typedef struct bs_equip_rules {
     uint8_t material;            /* the best material, 0 Iron .. 9 Daedric */
 } bs_equip_rules;
 
-/* No restrictions: until characters have classes. */
+/* No restrictions: the character for --level, without a class. */
 static inline bs_equip_rules bs_equip_rules_any(void)
 {
     return (bs_equip_rules){0, 3, 9};
@@ -125,6 +125,7 @@ typedef enum bs_item_where {
     BS_ITEM_IN_OBJECT,      /* in a level object filled with items (a chest) */
     BS_ITEM_IN_ITEM,        /* in a container item (a sack) */
     BS_ITEM_CARRIED,        /* in the player's inventory */
+    BS_ITEM_HELD,           /* held by a monster (its loot, from a save): ref the monster's index */
 } bs_item_where;
 
 /* A place items are in: one list of the inventory screen. */
@@ -175,6 +176,16 @@ uint32_t bs_items_cell(int32_t grid_cell, const float pos[3]);
  */
 bs_result bs_items_add_level(bs_items *it, const bs_bs6_level *level, const bs_item_db *db, int level_number,
                              bool multiplayer, int32_t grid_cell, bs_rng *r);
+
+/* The level objects filled with items (STRU 116), without making their items: for a level whose items come
+ * from elsewhere (a save). */
+bs_result bs_items_level_containers(bs_items *it, const bs_bs6_level *level);
+
+/* What a monster holds falls at pos (where it died). Returns how many items. */
+uint32_t bs_items_drop_held(bs_items *it, uint32_t monster, const float pos[3]);
+
+/* Everything monsters hold is gone (the monsters are made again). */
+void bs_items_forget_held(bs_items *it);
 
 /* Keeps only what the player carries (for the next level). */
 void bs_items_keep_carried(bs_items *it);
@@ -259,6 +270,21 @@ uint32_t bs_items_worn(const bs_items *it, int32_t base);
 uint32_t bs_items_weapon(const bs_items *it);
 uint32_t bs_items_arrows(const bs_items *it);
 uint32_t bs_items_secondary(const bs_items *it);
+
+/* The weapon in hand and the secondary weapon swap places (0x48C9F): the one in hand becomes the
+ * secondary, the secondary is wielded. Either may be missing. */
+void bs_items_switch_weapons(bs_items *it);
+
+/* The thirteen items anyone may equip never wear out (0x5459A). */
+bool bs_item_indestructible(const bs_item *x);
+
+/* An item loses condition (0x51230); at 0 it's destroyed ("%s is destroyed...") and gone. Returns
+ * whether it was destroyed. */
+bool bs_items_wear(bs_items *it, uint32_t i, int32_t amount);
+
+/* One arrow off the arrows ready (0x4A6E6), into out; the stack is gone with its last. False with no
+ * arrows ready. */
+bool bs_items_take_arrow(bs_items *it, bs_item *out);
 
 /* A bow or crossbow without arrows ready is put away (0x4E7A4). Returns whether it was. */
 bool bs_items_check_bow(bs_items *it);

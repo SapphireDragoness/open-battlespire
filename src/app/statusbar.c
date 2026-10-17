@@ -10,11 +10,14 @@
 #define VIAL_FRAMES 32
 #define FULL_HEALTH_X 10            /* the vials in the full view (0x2E920) */
 #define FULL_SPELL_POINTS_X 54
-/* Where the face goes (measured from two screenshots, a female High Elf's and a male Dark Elf's: the
- * game's rule isn't found): the top of the head 10 below the bar's top, its right edge at x 107. */
-#define FACE_TOP 390
-#define FACE_RIGHT 107
-#define HEAD_ROWS 60
+/* The face (0x5678A): the paper doll cut out around its eyes, from 70 left and 35 above the eyes
+ * image's placement, into a 149 x 100 picture at (0, 380); the frame fram00.bsi goes over it. */
+#define FACE_X 0
+#define FACE_Y 380
+#define FACE_W 149
+#define FACE_H 100
+#define FACE_LEFT_OF_EYES 70
+#define FACE_ABOVE_EYES 35
 
 /* The buttons (0xED838: x0, y0, x1, y1, inclusive). */
 static const int buttons[STATUSBAR_BUTTONS][4] = {
@@ -34,49 +37,23 @@ void statusbar_load(statusbar *s, bs_assets *a)
     s->spell_points = bs_assets_image(a, "engy02.bsi");
     s->compass = bs_assets_image(a, "comp00.bsi");
     s->compass_full = bs_assets_image(a, "comp01.bsi");
+    s->face_frame = bs_assets_image(a, "fram00.bsi");
 }
 
-/* The head in the body image: its top row and the right edge of its first rows, in screen pixels. */
-static bool head_of(const bs_bsi_image *body, int *top, int *right)
+void statusbar_set_face(statusbar *s, const bs_bsi_image *const *layers, int count, const bs_bsi_image *eyes)
 {
-    if (!body || !body->pixels || !body->transparent)
-        return false;
-    int t = -1, r = -1;
-    for (uint32_t j = 0; j < body->height && (t < 0 || (int)j < t + HEAD_ROWS); j++) {
-        const uint8_t *row = body->pixels + (size_t)j * body->width;
-        for (uint32_t i = 0; i < body->width; i++)
-            if (row[i]) {
-                if (t < 0)
-                    t = (int)j;
-                if ((int)i > r)
-                    r = (int)i;
-            }
+    if (count > STATUSBAR_FACE_LAYERS)
+        count = STATUSBAR_FACE_LAYERS;
+    if (!eyes) {
+        s->face_count = 0;
+        return;
     }
-    if (t < 0)
-        return false;
-    *top = body->y + t;
-    *right = body->x + r;
-    return true;
-}
-
-void statusbar_set_face(statusbar *s, bs_assets *a, char sex, const char *race, int hair, int eyes, int mouth)
-{
-    char name[24];
-    snprintf(name, sizeof name, "%c%sbd001.bsi", sex, race);
-    s->face[0] = bs_assets_image(a, name);
-    snprintf(name, sizeof name, "%c%sey%03d.bsi", sex, race, eyes);
-    s->face[1] = bs_assets_image(a, name);
-    snprintf(name, sizeof name, "%c%smt%03d.bsi", sex, race, mouth);
-    s->face[2] = bs_assets_image(a, name);
-    snprintf(name, sizeof name, "%c%shr%03d.bsi", sex, race, hair);
-    s->face[3] = bs_assets_image(a, name);
-    int top, right;
-    if (head_of(s->face[0], &top, &right)) {
-        s->face_dx = FACE_RIGHT - right;
-        s->face_dy = FACE_TOP - top;
-    } else {
-        s->face[0] = NULL;
-    }
+    int left = eyes->x - FACE_LEFT_OF_EYES, top = eyes->y - FACE_ABOVE_EYES;
+    s->face_dx = FACE_X - (left < 0 ? 0 : left);
+    s->face_dy = FACE_Y - (top < 0 ? 0 : top);
+    for (int i = 0; i < count; i++)
+        s->face[i] = layers[i];
+    s->face_count = count;
 }
 
 /* A vial's frame (0x2E939): full is 0, empty 31. */
@@ -105,12 +82,13 @@ void statusbar_draw(const statusbar *s, bs_overlay *o, const bs_character *c, in
         return;
     }
     /* The face shows through the bar's hole. */
-    if (s->face[0]) {
-        bs_overlay_clip(o, 0, BAR_TOP, BS_OVERLAY_WIDTH, BAR_HEIGHT);
-        for (int i = 0; i < 4; i++)
-            if (s->face[i])
-                bs_overlay_image(o, s->face[i], s->face_dx, s->face_dy);
+    if (s->face_count > 0) {
+        bs_overlay_clip(o, FACE_X, FACE_Y, FACE_W, FACE_H);
+        for (int i = 0; i < s->face_count; i++)
+            bs_overlay_image(o, s->face[i], s->face_dx, s->face_dy);
         bs_overlay_clip(o, 0, 0, 0, 0);
+        if (s->face_frame)
+            bs_overlay_image(o, s->face_frame, 0, 0);
     }
     if (s->panel && s->panel->count >= 6) {
         bs_overlay_image(o, &s->panel->images[1], 0, 0);

@@ -63,6 +63,9 @@ typedef struct bs_melee {
     int32_t shield;             /* the defender's shield left */
 } bs_melee;
 
+/* Where a blow or an arrow lands (0xEF1AC): 0 head .. 5 feet. */
+int bs_hit_location(bs_rng *r);
+
 /* skill_mult and damage_mult are in quarters: 4 is x1 (monsters always pass 4). */
 bs_melee bs_melee_roll(const bs_fighter *att, const bs_fighter *def, int32_t skill_mult, int32_t damage_mult,
                        bs_rng *r);

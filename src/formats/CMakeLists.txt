@@ -1,4 +1,5 @@
 add_library(bs_formats STATIC
+    src/automap.c
     src/book.c
     src/bs6.c
     src/bsa.c
@@ -15,6 +16,9 @@ add_library(bs_formats STATIC
     src/nodes.c
     src/palette.c
     src/rsc.c
+    src/scl.c
+    src/save.c
+    src/talk.c
     src/smacker.c
     src/spells.c
     src/wav.c)
