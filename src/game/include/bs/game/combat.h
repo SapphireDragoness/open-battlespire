@@ -19,7 +19,8 @@
  * - The chance to hit: (attack - defence) / 2 + 50, attack being the weapon
  *   skill + (Luck - 50) / 5 + Agility / 5 (scaled by the swing), defence the
  *   defender's skill with its own weapon + Luck / 10 + Agility / 5; less the
- *   defender's dodge skill / 5 %; kept within 5 .. 95.
+ *   defender's dodge skill / 5 %; +15 for a player with Adrenaline Rush at
+ *   no more than 25 / 256 of their health; kept within 5 .. 95.
  * - The player's critical blows (skill 20 / 7 + chance / 20) do triple the
  *   weapon's maximum or stun; fumbles (the top (100 - chance) / 20) hurt the
  *   player's weapon or balance.
@@ -44,6 +45,7 @@ typedef struct bs_fighter {
     int32_t shield;             /* +0x16E: absorbs damage before the armour */
     bool wraith;                /* a Wraith's blows scale with its health */
     bool unhurt;                /* a level 5 Herne: no damage */
+    bool adrenaline_rush;       /* the player's advantage (+0x19E): +15 to hit at low health */
 } bs_fighter;
 
 typedef enum bs_melee_outcome {

@@ -17,6 +17,7 @@ typedef enum voice_kind { VOICE_FREE, VOICE_SOUND, VOICE_STREAM } voice_kind;
 
 typedef struct voice {
     voice_kind kind;
+    bs_voice handle;  /* the slot in the low byte, a serial above it: a reused slot gets a new handle */
     SDL_AudioStream *stream;
     /* sounds: signed 16-bit samples, 1 or 2 channels */
     int16_t *pcm;
@@ -30,6 +31,7 @@ struct bs_audio {
     SDL_AudioDeviceID dev;
     SDL_AudioSpec dev_spec;
     voice voices[MAX_VOICES];
+    uint32_t serial;
 
     SDL_AudioStream *music;
     stb_vorbis *vorbis;
@@ -115,12 +117,19 @@ static int alloc_voice(bs_audio *a)
     return -1;
 }
 
+static bs_voice new_handle(bs_audio *a, int i)
+{
+    a->serial = (a->serial + 1) & 0x7FFFFF;
+    return a->voices[i].handle = (bs_voice)(a->serial << 8 | (uint32_t)(i + 1));
+}
+
 static voice *get_voice(bs_audio *a, bs_voice h, voice_kind kind)
 {
-    if (h < 1 || h > MAX_VOICES)
+    int i = (h & 0xFF) - 1;
+    if (h < 1 || i < 0 || i >= MAX_VOICES)
         return NULL;
-    voice *v = &a->voices[h - 1];
-    return v->kind == kind ? v : NULL;
+    voice *v = &a->voices[i];
+    return v->kind == kind && v->handle == h ? v : NULL;
 }
 
 static bool valid_format(bs_pcm_format f)
@@ -200,7 +209,7 @@ bs_voice bs_audio_play(bs_audio *a, const void *pcm, size_t bytes, bs_pcm_format
         free_voice(v);
         return 0;
     }
-    return i + 1;
+    return new_handle(a, i);
 }
 
 void bs_audio_set(bs_audio *a, bs_voice h, float gain, float pan)
@@ -327,7 +336,7 @@ bs_voice bs_audio_open_stream(bs_audio *a, bs_pcm_format fmt)
         return 0;
     }
     v->kind = VOICE_STREAM;
-    return i + 1;
+    return new_handle(a, i);
 }
 
 bs_result bs_audio_push(bs_audio *a, bs_voice h, const void *pcm, size_t bytes)

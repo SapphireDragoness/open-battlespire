@@ -30,6 +30,7 @@
 #include "bs/audio/level_audio.h"
 #include "bs/audio/video.h"
 #include "bs/core/fs.h"
+#include "bs/core/ini.h"
 #include "bs/core/install.h"
 #include "bs/core/log.h"
 #include "bs/core/png.h"
@@ -67,14 +68,10 @@
 #include "menus.h"
 #include "statusbar.h"
 
-#define MOUSE_SENSITIVITY 0.0025f
-/* Keyboard turning and looking (the original's turn rate is an option; these are guesses). */
-#define TURN_RATE 3.0f       /* radians per second */
-#define LOOK_RATE 1.5f
+#define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel at the Controls screen's sensitivity 1 */
 #define FLY_SPEED 400.0f     /* level units per second, flying */
 #define SOUND_JUMP 401       /* 400 for a female character (0x40BAB) */
 #define SOUND_SPLASH 86      /* falling into water (0x3FC5C) */
-#define BOAT_TURN_RATE (TURN_RATE / 2)  /* the strafe keys turn a boat at half the turning keys' rate (0x3F209) */
 #define MSG_SLOW_FALL 13     /* "Slowfalling active." */
 #define MSG_TOO_HEAVY 14     /* "You carry too much stuff to stay afloat!" */
 /* The balloon (0x21A1x): 20 s after it was left, or stood on, it rises at 150 units/s to 3000 above the player,
@@ -129,7 +126,7 @@ typedef struct options {
     bool no_intro;
     bool mute;
     bool fixed_ambience;
-    bool original_keys;
+    bool original_keys, keys_given;
     int width, height;
     bool female;             /* the character for --level (Single Player makes one) */
     const char *race;
@@ -193,6 +190,7 @@ typedef struct game {
 
     /* Text and items, read from GAME.EXE, TXT.BSA, TEXT.RSC; any may be missing. */
     bs_exe_text text;
+    bs_exe_text key_names;       /* by PC scan code, for the Controls screen */
     bs_rsc rsc;
     bs_item_tables item_tables;
     bs_magic_table magic[2];
@@ -285,6 +283,10 @@ typedef struct game {
     bs_font fonts[MENU_FONTS];   /* FONT0001 .. FONT0010 by number, for the screens */
     bool have_font[MENU_FONTS];
     bool cursor_held;            /* Enter held: the cursor shows to click the bar (the "+" cursor) */
+    const bs_bsi_image *direc[9]; /* direc0..8.bsi: Cursor movement's pointers by zone (0x41A41) */
+    int arrow;                   /* the one drawn this frame, over the system pointer's place; -1 none */
+    int arrow_x, arrow_y;
+    bool pointer_hidden;         /* the system pointer is hidden for it */
     menus menus;                 /* the bar's screens: help, character sheet, automap, options */
     bs_automap_table maps;
     /* Conversations (talk.c). */
@@ -372,7 +374,12 @@ static void usage(FILE *out)
             "the books the spell book and the automap (F11), the chest the inventory, the gears\n"
             "the options (Esc), the compass lists the hot keys, ? shows help. Tab hides the bar.\n"
             "The options' Save picks a slot and takes a name; Load shows your saves, Page Down\n"
-            "the original game's.\n"
+            "the original game's. Screen Size shrinks the view and picks the resolution;\n"
+            "Controls sets the keys (click a box, press a key or button), the mouse and the turn\n"
+            "rate. Both are kept in settings.ini in your data folder (--keys keeps its layout).\n"
+            "Controls' Cursor movement leaves the mouse free: hold the left button over the view\n"
+            "to go where the arrow points (forward at the top, turning at the sides, stepping\n"
+            "back or aside at the bottom); in the centre (the cross) a click uses.\n"
             "In water, up/down rise and dive; the bar at the right is your breath. Use a boat or\n"
             "the balloon to get in; the sideways keys turn a boat, up/down move the balloon, and\n"
             "the leave key gets you out.\n"
@@ -381,8 +388,8 @@ static void usage(FILE *out)
             "  original: arrows move, Alt jump, Delete/End turn, Insert/Home look, S sneak,\n"
             "            Space + mouse back duck, A switch weapon, PgUp/PgDn up/down, F10 inventory,\n"
             "            D leave a boat\n"
-            "  both:     F fly (Shift faster), G classic/enhanced rendering, M sound, Esc options\n"
-            "            (End Game goes back to the title)\n");
+            "  both:     L lantern, F fly (Shift faster), G classic/enhanced rendering, M sound,\n"
+            "            Esc options (End Game goes back to the title)\n");
 }
 
 static bool parse_args(int argc, char **argv, options *o, bool *help)
@@ -439,6 +446,7 @@ static bool parse_args(int argc, char **argv, options *o, bool *help)
         }
         else if (strcmp(a, "--keys") == 0 && has) {
             const char *k = argv[++i];
+            o->keys_given = true;
             if (strcmp(k, "original") == 0)
                 o->original_keys = true;
             else if (strcmp(k, "modern") != 0)
@@ -505,6 +513,7 @@ static fight_env fight_env_of(game *g);
 static void show_instances(game *g);
 static void open_menu(game *g, menu_kind k);
 static void setup_rides(game *g);
+static int pointer_zone(game *g, float *amount, int *px, int *py);
 
 /* After a video: the level it leads to, or the title. */
 static void after_video(game *g)
@@ -808,6 +817,8 @@ static bool enter_level_ex(game *g, const char *file, int32_t arrival, bool thro
     char title[128];
     snprintf(title, sizeof title, "OpenBattlespire - %s", campaign ? campaign->name : file);
     SDL_SetWindowTitle(g->window, title);
+    if (!g->keys.turn_rate)
+        g->keys.turn_rate = CONTROLS_TURN_RATE_START; /* the slider's 256 (0x12BDE) */
     return true;
 }
 
@@ -1053,11 +1064,27 @@ static fight_env fight_env_of(game *g)
     };
 }
 
+/* Where a sound's source is now (SOUND_FROM_*), for the level audio. */
+static bool sound_source(void *ctx, uint32_t source, float pos[3])
+{
+    const game *g = ctx;
+    uint32_t i = source & 0xFFFFFF;
+    const float *at = NULL;
+    if ((source & ~0xFFFFFFu) == SOUND_FROM_MONSTER(0) && i < g->fight.monsters.count)
+        at = g->fight.monsters.list[i].body.pos;
+    else if ((source & ~0xFFFFFFu) == SOUND_FROM_OBJECT(0) && i < g->logic.object_count)
+        at = g->logic.objects[i].pos;
+    if (!at)
+        return false;
+    memcpy(pos, at, 3 * sizeof *pos);
+    return true;
+}
+
 static void apply_logic(game *g, const bs_logic_output *out)
 {
     for (uint32_t i = 0; i < out->sound_count; i++)
-        bs_level_audio_play_at(&g->level_audio, out->sounds[i].id, g->logic.objects[out->sounds[i].object].pos,
-                               g->cam.pos, g->cam.yaw);
+        bs_level_audio_play_at(&g->level_audio, out->sounds[i].id, SOUND_FROM_OBJECT(out->sounds[i].object),
+                               g->logic.objects[out->sounds[i].object].pos, g->cam.pos, g->cam.yaw);
     if (out->player_moved) {
         /* Teleported: the logic moved the player's feet. */
         memcpy(g->player.pos, g->logic.player, sizeof g->player.pos);
@@ -1583,15 +1610,26 @@ static bool carrying_too_much(game *g)
 static void walk(game *g, uint32_t dt_ms)
 {
     const controls *c = &g->keys;
-    if (g->keys.original && !controls_held(c, ACT_SPECIAL))
+    if (!controls_held(c, ACT_SPECIAL))
         g->ducking = false; /* ducking lasts while Special is held */
     struct ride *rd = g->riding >= 0 ? &g->rides[g->riding] : NULL;
     float strafe = (float)(controls_held(c, ACT_RIGHT) - controls_held(c, ACT_LEFT)), turn = 0;
     if (rd && rd->kind == BS_RIDE_BOAT && strafe != 0) {
-        /* The strafe keys turn a boat, and the view with it (0x3F209). */
-        turn = strafe * BOAT_TURN_RATE * (float)dt_ms / 1000.0f;
+        /* The strafe keys turn a boat, and the view with it, at half the turning keys' rate (0x3F209). */
+        turn = strafe * controls_turn_speed(c) / 2 * (float)dt_ms / 1000.0f;
         g->cam.yaw += turn;
         rd->yaw -= turn * 2048.0f / (2.0f * SDL_PI_F);
+    }
+    /* Cursor movement (0x41C04): with the left button held, the pointer's zone turns and moves, on the ground,
+     * in water or riding, as the keys do. */
+    bs_cursor_steer cs = {0};
+    float amount = 0;
+    if (c->cursor_movement && !g->spellbook.open && !g->teleporting &&
+        (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON_LMASK)) {
+        int zone = pointer_zone(g, &amount, NULL, NULL);
+        cs = bs_cursor_steer_of(zone, amount, bs_character_attribute(&g->character, 6), c->turn_rate);
+        if (g->player.on_ground || g->player.swimming || rd)
+            g->cam.yaw += cs.turn * (float)dt_ms / 1000.0f;
     }
     bool heavy = g->player.swimming && carrying_too_much(g);
     bs_player_input in = {
@@ -1606,11 +1644,13 @@ static void walk(game *g, uint32_t dt_ms)
         .ride = rd ? rd->kind : BS_RIDE_NONE,
         /* A boat goes along its model's heading, the mirror of its yaw (0x3F6A6). */
         .ride_heading = rd ? (2047.0f - rd->yaw) * 2.0f * SDL_PI_F / 2048.0f : 0.0f,
+        .cursor_forward = cs.forward,
+        .cursor_strafe = cs.strafe,
         .jump = controls_held(c, ACT_JUMP),
         .duck = g->ducking || controls_held(c, ACT_DUCK),
         .sneak = g->sneaking,
+        .athleticism = g->character.athleticism,
         /* Spells' effects. */
-        .run = (g->character.flags & BS_FLAG_RUNNING) != 0,
         .jumping = (g->character.flags & BS_FLAG_JUMPING) != 0,
         .slow_fall = (g->character.flags & BS_FLAG_SLOW_FALL) != 0,
     };
@@ -1638,7 +1678,7 @@ static void walk(game *g, uint32_t dt_ms)
         rd->yaw += turn * 2048.0f / (2.0f * SDL_PI_F);
     }
     if (ev.splashed) {
-        bs_level_audio_play_at(&g->level_audio, SOUND_SPLASH, g->cam.pos, g->cam.pos, g->cam.yaw);
+        bs_level_audio_play_at(&g->level_audio, SOUND_SPLASH, 0, NULL, g->cam.pos, g->cam.yaw);
         if (carrying_too_much(g))
             message(g, bs_exe_message(&g->text, MSG_TOO_HEAVY));
     }
@@ -1663,7 +1703,7 @@ static void walk(game *g, uint32_t dt_ms)
     }
     bs_player_eye(p, g->cam.pos);
     if (ev.jumped) {
-        bs_level_audio_play_at(&g->level_audio, SOUND_JUMP, g->cam.pos, g->cam.pos, g->cam.yaw);
+        bs_level_audio_play_at(&g->level_audio, SOUND_JUMP, 0, NULL, g->cam.pos, g->cam.yaw);
         bs_skill_used(&g->character, BS_SKILL_JUMPING, 1); /* (0x40B96) */
     }
     /* While a jump charges, the pointer spins where it will land (0x4163D). */
@@ -1798,10 +1838,9 @@ static void run_level(game *g, float dt)
     uint32_t dt_ms = (uint32_t)(fminf(dt, 0.1f) * 1000.0f);
     /* Keyboard turning and looking. */
     float secs = (float)dt_ms / 1000.0f;
-    g->cam.yaw += (float)(controls_held(&g->keys, ACT_TURN_RIGHT) - controls_held(&g->keys, ACT_TURN_LEFT)) *
-                  TURN_RATE * secs;
-    g->cam.pitch += (float)(controls_held(&g->keys, ACT_LOOK_UP) - controls_held(&g->keys, ACT_LOOK_DOWN)) *
-                    LOOK_RATE * secs;
+    float rate = controls_turn_speed(&g->keys) * secs; /* the turn rate x 6 angle units a second (0x3F19F) */
+    g->cam.yaw += (float)(controls_held(&g->keys, ACT_TURN_RIGHT) - controls_held(&g->keys, ACT_TURN_LEFT)) * rate;
+    g->cam.pitch += (float)(controls_held(&g->keys, ACT_LOOK_UP) - controls_held(&g->keys, ACT_LOOK_DOWN)) * rate;
     g->cam.pitch = fmaxf(fminf(g->cam.pitch, 1.55f), -1.55f);
     if (g->fight.player_died) {
         /* Dead: down to the floor (0x1E64F), the ending after 2 s. */
@@ -1953,6 +1992,61 @@ static void window_to_screen(game *g, float wx, float wy, int *x, int *y)
     *y = (int)((wy - ((float)wh - 480.0f * sc) / 2.0f) / sc);
 }
 
+/* Cursor movement: the zone the mouse pointer is in (bs_cursor_zone), and where on the screen it is. */
+static int pointer_zone(game *g, float *amount, int *px, int *py)
+{
+    float wx, wy;
+    SDL_GetMouseState(&wx, &wy);
+    int x, y;
+    window_to_screen(g, wx, wy, &x, &y);
+    x = x < 0 ? 0 : x > 639 ? 639 : x;
+    y = y < 0 ? 0 : y > 479 ? 479 : y;
+    if (px) {
+        *px = x;
+        *py = y;
+    }
+    return bs_cursor_zone(x, y, statusbar_view_bottom(&g->bar), amount);
+}
+
+/* Cursor movement's pointer (0x124D0): while the level runs, the mouse stays free, and over the view the
+ * zone's arrow is drawn into the overlay with its top left at the pointer, which is hidden. */
+static void update_pointer(game *g)
+{
+    int was = g->arrow;
+    g->arrow = -1;
+    bool running = g->state == STATE_LEVEL && !g->inv.open && !g->loadsave.open && !g->talk.open &&
+                   g->menus.open == MENU_NONE && !g->spellbook.open && !g->teleporting;
+    if (running && g->keys.cursor_movement) {
+        if (SDL_GetWindowRelativeMouseMode(g->window))
+            SDL_SetWindowRelativeMouseMode(g->window, false);
+        float amount;
+        int zone = pointer_zone(g, &amount, &g->arrow_x, &g->arrow_y);
+        if (zone != BS_CURSOR_OFF && g->direc[zone] && SDL_GetMouseFocus() == g->window)
+            g->arrow = zone;
+    }
+    if (g->arrow >= 0 || was >= 0)
+        g->overlay_dirty = true;
+    bool hide = g->arrow >= 0;
+    if (hide != g->pointer_hidden) {
+        if (hide)
+            SDL_HideCursor();
+        else
+            SDL_ShowCursor();
+        g->pointer_hidden = hide;
+    }
+}
+
+/* Cursor movement: whether an event selects (0x410AA). Select does only with the pointer in the centre zone;
+ * a press of the right button does too, unless it swings the weapon. */
+static bool cursor_select(game *g, const SDL_Event *e)
+{
+    float amount;
+    if (controls_pressed(&g->keys, ACT_USE, e))
+        return pointer_zone(g, &amount, NULL, NULL) == 4;
+    return e->type == SDL_EVENT_MOUSE_BUTTON_DOWN && e->button.button == SDL_BUTTON_RIGHT &&
+           !controls_pressed(&g->keys, ACT_ATTACK, e);
+}
+
 /* The automap of where the player is (0x57ECF), or NULL. */
 static const bs_automap_entry *current_map(const game *g, int *index)
 {
@@ -1985,6 +2079,8 @@ static menu_env menu_env_of(game *g, const bs_bsi_image **doll, int doll_cap)
     e.player_yaw = (int32_t)lroundf(g->player.yaw * 2048.0f / (2.0f * 3.14159265f)) & 0x7FF;
     e.full_view = g->bar.full_view;
     e.now_ms = SDL_GetTicks();
+    e.keys = &g->keys;
+    e.key_names = &g->key_names;
     e.text = &g->text;
     e.message = fight_message;
     e.ctx = g;
@@ -2437,6 +2533,100 @@ static void bar_click(game *g, statusbar_button b)
 static void open_loadsave(game *g, loadsave_mode mode);
 static const char *saves_dir(game *g);
 
+/* ---- settings ---- */
+
+/* What the game keeps in screen.dat (0x2EEFD: the view size, the resolution, the help pop-ups) and
+ * controls.dat (0x1F757: the keys, the mouse), with the turn rate and the movement, ours in settings.ini in
+ * the user's data folder. */
+static bool settings_path(char *out, size_t cap)
+{
+    char *pref = SDL_GetPrefPath("OpenBattlespire", "OpenBattlespire");
+    if (!pref)
+        return false;
+    snprintf(out, cap, "%ssettings.ini", pref);
+    SDL_free(pref);
+    return true;
+}
+
+static void load_settings(game *g, bool keep_keys)
+{
+    char path[BS_PATH_MAX];
+    if (!settings_path(path, sizeof path) || !bs_fs_is_file(path))
+        return;
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    uint8_t *data;
+    size_t size;
+    bs_ini ini;
+    if (bs_fs_read_file(path, &a, &data, &size) == BS_OK &&
+        bs_ini_parse((const char *)data, size, &a, &ini, NULL) == BS_OK) {
+        for (uint32_t i = 0; i < ini.count; i++) {
+            if (strcmp(ini.sections[i].name, "controls") == 0) {
+                /* --keys keeps its layout's bindings. */
+                controls c = g->keys;
+                controls_read(&c, &ini.sections[i]);
+                if (keep_keys) {
+                    memcpy(c.bind, g->keys.bind, sizeof c.bind);
+                    c.original = g->keys.original;
+                }
+                g->keys = c;
+            }
+            if (strcmp(ini.sections[i].name, "screen") != 0)
+                continue;
+            const char *v;
+            if ((v = bs_ini_get(&ini.sections[i], "view_size")) && v[0] >= '0' && v[0] <= '7' && !v[1])
+                g->menus.view_size = v[0] - '0';
+            if ((v = bs_ini_get(&ini.sections[i], "low_resolution")))
+                g->menus.low_resolution = strcmp(v, "no") != 0;
+            if ((v = bs_ini_get(&ini.sections[i], "help_popups")))
+                g->menus.auto_help = strcmp(v, "no") != 0;
+        }
+    } else {
+        BS_WARN("%s: not read", path);
+    }
+    bs_arena_free(&a);
+}
+
+static void save_settings(game *g)
+{
+    char path[BS_PATH_MAX];
+    if (!settings_path(path, sizeof path))
+        return;
+    bs_ini_writer w;
+    bs_ini_writer_init(&w);
+    bs_ini_printf(&w, "# OpenBattlespire's settings\n");
+    bs_ini_section_begin(&w, "screen");
+    bs_ini_put(&w, "view_size", "0 .. 7, 7 the whole screen", "%d", g->menus.view_size);
+    bs_ini_put(&w, "low_resolution", "the view drawn at half size and doubled", "%s",
+               g->menus.low_resolution ? "yes" : "no");
+    bs_ini_put(&w, "help_popups", NULL, "%s", g->menus.auto_help ? "yes" : "no");
+    controls_write(&g->keys, &w);
+    if (w.failed || bs_fs_write_file(path, w.text, w.len) != BS_OK)
+        BS_WARN("%s: not saved", path);
+    bs_ini_writer_free(&w);
+}
+
+/* What the Controls screen sets that SDL keeps: the double-click time, for click counts. */
+static void apply_controls(game *g)
+{
+    char ms[16];
+    snprintf(ms, sizeof ms, "%u", controls_double_click_ms(&g->keys));
+    SDL_SetHint(SDL_HINT_MOUSE_DOUBLE_CLICK_TIME, ms);
+}
+
+/* The level as the game shows it, in the view Screen Size sets. Enhanced mode fills the window when the view
+ * is the whole screen. */
+static void draw_level_view(game *g, int w, int h, double time)
+{
+    int r[4], dw, dh;
+    menus_view_rect(&g->menus, r, &dw, &dh);
+    if (g->menus.view_size >= 7 && !g->settings.classic)
+        bs_level_renderer_draw(g->level.renderer, &g->cam, &g->settings, w, h, time);
+    else
+        bs_level_renderer_draw_view(g->level.renderer, &g->cam, &g->settings, w, h, time, r[0], r[1], r[2], r[3],
+                                    dw, dh);
+}
+
 /* What a screen's button did. */
 static void menu_did(game *g, menu_action a)
 {
@@ -2470,8 +2660,10 @@ static void menu_did(game *g, menu_action a)
     case MENU_SAVE:
         g->picture_pending = true; /* the save screen opens once the view is drawn without the bar */
         break;
-    case MENU_NOT_THERE:
-        message(g, "Not available yet.");
+    case MENU_SCREEN_DONE:
+    case MENU_CONTROLS_DONE:
+        save_settings(g);
+        apply_controls(g);
         break;
     default:
         break;
@@ -2490,7 +2682,7 @@ static void creation_sound(void *ctx, int32_t id)
 {
     game *g = ctx;
     static const float here[3] = {0, 0, 0};
-    bs_level_audio_play_at(&g->level_audio, id, here, here, 0.0f);
+    bs_level_audio_play_at(&g->level_audio, id, 0, NULL, here, 0.0f);
 }
 
 static void creation_item_lines(void *ctx, const bs_item *it, char *l1, char *l2, size_t cap)
@@ -2518,6 +2710,7 @@ static creation_env creation_env_of(game *g)
     e.picture_count = g->picture_count;
     e.rng = &g->rng;
     e.now_ms = SDL_GetTicks();
+    e.double_click_ms = controls_double_click_ms(&g->keys);
     e.help = &g->menus;
     e.save_root = g->inst.root;
     e.saves_dir = saves_dir(g);
@@ -3360,7 +3553,8 @@ static bool save_game(game *g, int slot, const char *name)
 static loadsave_env loadsave_env_of(game *g)
 {
     loadsave_env e = {.assets = g->assets, .saves_dir = saves_dir(g), .original_dir = g->inst.root,
-                      .now_ms = SDL_GetTicks(), .message = fight_message, .ctx = g};
+                      .now_ms = SDL_GetTicks(), .double_click_ms = controls_double_click_ms(&g->keys),
+                      .message = fight_message, .ctx = g};
     for (int i = 1; i < MENU_FONTS; i++)
         e.fonts[i] = g->have_font[i] ? &g->fonts[i] : NULL;
     return e;
@@ -3590,12 +3784,12 @@ static void handle_event(game *g, const SDL_Event *e)
                 if (!spellbook_event(&g->spellbook, &be, &pe, ww, wh))
                     close_spellbook(g);
                 g->overlay_dirty = true;
-                if (pe.type != SDL_EVENT_KEY_DOWN || pe.key.key == SDLK_ESCAPE || pe.key.key == SDLK_F12 ||
-                    (pe.key.key >= SDLK_F1 && pe.key.key <= SDLK_F8))
+                if (pe.type != SDL_EVENT_KEY_DOWN || pe.key.key == SDLK_ESCAPE ||
+                    controls_pressed(&g->keys, ACT_SPELLBOOK, &pe) || (pe.key.key >= SDLK_F1 && pe.key.key <= SDLK_F8))
                     break;
             }
         }
-        if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat && e->key.key == SDLK_F12) {
+        if (controls_pressed(&g->keys, ACT_SPELLBOOK, e)) {
             open_spellbook(g);
             break;
         }
@@ -3604,14 +3798,16 @@ static void handle_event(game *g, const SDL_Event *e)
             fight_hotkey(&g->fight, &fe, (int)(e->key.key - SDLK_F1));
             break;
         }
-        if (controls_pressed(&g->keys, ACT_USE, e) &&
-            (e->type != SDL_EVENT_MOUSE_BUTTON_DOWN || SDL_GetWindowRelativeMouseMode(g->window))) {
+        bool cursor = g->keys.cursor_movement;
+        if (cursor ? cursor_select(g, e)
+                   : controls_pressed(&g->keys, ACT_USE, e) &&
+                         (e->type != SDL_EVENT_MOUSE_BUTTON_DOWN || SDL_GetWindowRelativeMouseMode(g->window))) {
             fight_env fe = fight_env_of(g);
             if (!fight_use(&g->fight, &fe, USE_REACH) && !use_speaker(g))
                 use_object(g);
             break;
         }
-        if (controls_pressed(&g->keys, ACT_ATTACK, e) && SDL_GetWindowRelativeMouseMode(g->window)) {
+        if (controls_pressed(&g->keys, ACT_ATTACK, e) && (cursor || SDL_GetWindowRelativeMouseMode(g->window))) {
             fight_env fe = fight_env_of(g);
             fight_attack_pressed(&g->fight, &fe);
             break;
@@ -3646,25 +3842,33 @@ static void handle_event(game *g, const SDL_Event *e)
             open_menu(g, MENU_AUTOMAP);
             break;
         }
-        if (e->type == SDL_EVENT_KEY_UP && (e->key.key == SDLK_RETURN || e->key.key == SDLK_KP_ENTER) &&
-            g->cursor_held) {
+        if (controls_pressed(&g->keys, ACT_FULL_VIEW, e)) {
+            g->bar.full_view = !g->bar.full_view;
+            g->overlay_dirty = true;
+            break;
+        }
+        if (controls_pressed(&g->keys, ACT_LANTERN, e)) {
+            g->settings.player_light = !g->settings.player_light; /* 0x41189 */
+            break;
+        }
+        if (controls_pressed(&g->keys, ACT_CURSOR, e) && SDL_GetWindowRelativeMouseMode(g->window)) {
+            /* Held, the cursor shows (the game's "+" cursor) to click the bar. */
+            g->cursor_held = true;
+            SDL_SetWindowRelativeMouseMode(g->window, false);
+            break;
+        }
+        if (g->cursor_held && ((e->type == SDL_EVENT_KEY_UP && !controls_held(&g->keys, ACT_CURSOR)) ||
+                               (e->type == SDL_EVENT_MOUSE_BUTTON_UP && !controls_held(&g->keys, ACT_CURSOR)))) {
             g->cursor_held = false;
             SDL_SetWindowRelativeMouseMode(g->window, true);
             break;
         }
         if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {
-            if ((e->key.key == SDLK_RETURN || e->key.key == SDLK_KP_ENTER) && SDL_GetWindowRelativeMouseMode(g->window)) {
-                /* Held, the cursor shows (the game's "+" cursor) to click the bar. */
-                g->cursor_held = true;
-                SDL_SetWindowRelativeMouseMode(g->window, false);
-            } else if (e->key.key == SDLK_ESCAPE) {
+            if (e->key.key == SDLK_ESCAPE) {
                 /* The options bar (End Game goes back to the title). */
                 open_menu(g, MENU_OPTIONS);
             } else if (e->key.key == SDLK_G) {
                 g->settings.classic = !g->settings.classic;
-            } else if (e->key.key == SDLK_TAB) {
-                g->bar.full_view = !g->bar.full_view;
-                g->overlay_dirty = true;
             } else if (e->key.key == SDLK_M && g->audio) {
                 static bool paused;
                 paused = !paused;
@@ -3680,9 +3884,10 @@ static void handle_event(game *g, const SDL_Event *e)
                     bar_click(g, statusbar_at(&g->bar, x, y));
                 break;
             }
-            SDL_SetWindowRelativeMouseMode(g->window, true);
-        } else if (e->type == SDL_EVENT_MOUSE_MOTION && SDL_GetWindowRelativeMouseMode(g->window)) {
-            if (g->keys.original && controls_held(&g->keys, ACT_SPECIAL)) {
+            if (!cursor) /* Cursor movement keeps the pointer */
+                SDL_SetWindowRelativeMouseMode(g->window, true);
+        } else if (e->type == SDL_EVENT_MOUSE_MOTION && (cursor || SDL_GetWindowRelativeMouseMode(g->window))) {
+            if (controls_held(&g->keys, ACT_SPECIAL)) {
                 /* Special moves: pulling the mouse back ducks (pushing it shoves, not implemented). */
                 if (e->motion.yrel > 0)
                     g->ducking = true;
@@ -3693,8 +3898,12 @@ static void handle_event(game *g, const SDL_Event *e)
                 fight_mouse(&g->fight, e->motion.xrel, e->motion.yrel);
                 break;
             }
-            g->cam.yaw += e->motion.xrel * MOUSE_SENSITIVITY;
-            g->cam.pitch = fmaxf(fminf(g->cam.pitch - e->motion.yrel * MOUSE_SENSITIVITY, 1.55f), -1.55f);
+            if (cursor)
+                break; /* the mouse looks around only in View movement (0x3F37D) */
+            /* View movement (0x3F3FA): the Controls screen's sensitivities, and Mouse Reverse. */
+            float dy = e->motion.yrel * MOUSE_SENSITIVITY * g->keys.sensitivity_y;
+            g->cam.yaw += e->motion.xrel * MOUSE_SENSITIVITY * g->keys.sensitivity_x;
+            g->cam.pitch = fmaxf(fminf(g->cam.pitch + (g->keys.reverse ? dy : -dy), 1.55f), -1.55f);
         }
         break;
     case STATE_QUIT:
@@ -3750,6 +3959,8 @@ static void load_text_and_items(game *g)
     bool loaded = bs_le_load(data, size, &g->arena, &img) == BS_OK;
     if (!loaded || bs_exe_text_read(&img, &g->arena, &g->text) != BS_OK)
         BS_WARN("no messages in GAME.EXE");
+    if (loaded && bs_exe_key_names(&img, &g->arena, &g->key_names) != BS_OK)
+        BS_WARN("no key names in GAME.EXE");
     if (bs_item_tables_read(data, size, &g->item_tables) == BS_OK && loaded &&
         bs_item_models_read(&img, &g->item_tables) == BS_OK) {
         static const char *const files[2] = {"MG0_GEN.TXT", "MG2_SPC.TXT"};
@@ -3829,6 +4040,11 @@ static void load_text_and_items(game *g)
         g->teleport_image = bs_assets_image(g->assets, "teleport.bsi");
         /* The interface bar. */
         statusbar_load(&g->bar, g->assets);
+        for (int i = 0; i < 9; i++) {
+            char name[16];
+            snprintf(name, sizeof name, "direc%d.bsi", i);
+            g->direc[i] = bs_assets_image(g->assets, name);
+        }
         if (!g->spell_panel)
             BS_WARN("no spmenu.bsi: no spell book");
         g->inv_arrows[0] = bs_assets_image(g->assets, "point0.bsi");
@@ -3986,8 +4202,12 @@ int main(int argc, char **argv)
     g.settings = bs_render_settings_default();
     g.cam.fov_y = 53.13f * SDL_PI_F / 180.0f; /* the game's at 640x480 (RE: 0x10F5C) */
     controls_set(&g.keys, o.original_keys);
+    load_settings(&g, o.keys_given);
+    apply_controls(&g);
     bs_level_audio_open(&g.level_audio, g.audio, &g.vfs);
     g.level_audio.fixed_ambience = o.fixed_ambience;
+    g.level_audio.locate = sound_source;
+    g.level_audio.locate_ctx = &g;
 
     g.state = STATE_QUIT; /* nothing to leave yet */
     if (o.load) {
@@ -4018,6 +4238,7 @@ int main(int argc, char **argv)
         last = now;
         int w, h;
         SDL_GetWindowSizeInPixels(g.window, &w, &h);
+        update_pointer(&g);
 
         switch (g.state) {
         case STATE_INTRO: {
@@ -4040,6 +4261,7 @@ int main(int argc, char **argv)
             draw_creation(&g, w, h);
             break;
         case STATE_LEVEL:
+            g.level_audio.acute_hearing = g.character.acute_hearing;
             bs_level_audio_update(&g.level_audio, g.cam.pos, g.cam.yaw, dt);
             if (g.inv.open && g.overlay) {
                 /* The world waits while the inventory is open. */
@@ -4082,7 +4304,7 @@ int main(int argc, char **argv)
                 int view = menus_view(&g.menus, r);
                 if (view == 1) {
                     show_instances(&g);
-                    bs_level_renderer_draw(g.level.renderer, &g.cam, &g.settings, w, h, (double)(now - start) / 1e9);
+                    draw_level_view(&g, w, h, (double)(now - start) / 1e9);
                 } else if (view == 2) {
                     bs_level_renderer_draw_inset(g.level.renderer, &g.cam, &g.settings, w, h,
                                                  (double)(now - start) / 1e9, r[0], r[1], r[2], r[3]);
@@ -4095,6 +4317,8 @@ int main(int argc, char **argv)
                 bs_overlay_clear(g.overlay);
                 const bs_bsi_image *doll[STATUSBAR_FACE_LAYERS];
                 menu_env me = menu_env_of(&g, doll, STATUSBAR_FACE_LAYERS);
+                if (view == 1)
+                    menus_draw_view_border(&g.menus, &me, g.overlay);
                 menus_draw(&g.menus, &me, g.overlay);
                 update_messages(&g);
                 draw_messages(&g);
@@ -4116,12 +4340,13 @@ int main(int argc, char **argv)
             }
             fight_draw(&g.fight, g.cam.pos, logic_now(&g), g.level.renderer);
             show_instances(&g);
-            bs_level_renderer_draw(g.level.renderer, &g.cam, &g.settings, w, h, (double)(now - start) / 1e9);
+            draw_level_view(&g, w, h, (double)(now - start) / 1e9);
             if (g.overlay) {
                 update_messages(&g);
                 if (g.overlay_dirty || g.hud_moving || hud_active(&g) || g.spellbook.open || g.teleporting ||
                     g.bar.panel) {
                     bs_overlay_clear(g.overlay);
+                    menus_draw_view_border(&g.menus, &(menu_env){.assets = g.assets}, g.overlay);
                     fight_env fe = fight_env_of(&g);
                     g.hud_moving = fight_draw_hud(&g.fight, &fe, g.overlay);
                     if (g.breath > 0) /* 7 wide at x 610, up from y 220 (0x1E6E0) */
@@ -4141,6 +4366,8 @@ int main(int argc, char **argv)
                     if (g.teleporting)
                         bs_overlay_image(g.overlay, g.teleport_image, 0, 0);
                     draw_messages(&g);
+                    if (g.arrow >= 0)
+                        bs_overlay_image(g.overlay, g.direc[g.arrow], g.arrow_x, g.arrow_y);
                     g.overlay_dirty = false;
                 }
                 bs_overlay_draw(g.overlay, w, h);

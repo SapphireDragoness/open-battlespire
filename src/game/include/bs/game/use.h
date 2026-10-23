@@ -55,7 +55,7 @@ enum {
     BS_FLAG_ABSORB = 0x20000,
     BS_FLAG_FIRE_SHIELD = 0x80000,
     BS_FLAG_JUMPING = 0x400000,
-    BS_FLAG_RUNNING = 0x800000,
+    BS_FLAG_RUNNING = 0x800000,        /* set by the spell but never read: Running does nothing (0x2874C) */
     BS_FLAG_ETHEREAL = 0x1000000,
     BS_FLAG_IMMUNE_FIRST = 27,         /* bit 27 + element: Resistance to that element (0xED686) */
 };
@@ -105,7 +105,10 @@ typedef struct bs_character {
     char class_name[24];               /* +0x17A */
     uint8_t class_skills[12];          /* +0x1A6: primary, major, minor; 0xFF none */
     int32_t magery;                    /* +0x19A: spell points per Intelligence, x 256 */
-    bool acute_hearing, regenerate_health, regenerate_sp, athleticism, adrenaline_rush;  /* not used in play yet */
+    bool acute_hearing;                /* +0x194: sounds carry 1024 / 768 as far (bs/audio/place.h) */
+    bool regenerate_health, regenerate_sp;  /* +0x197, +0x198: a point every 5 s (bs/game/levelling.h) */
+    bool athleticism;                  /* +0x199: faster walking and jumps (bs/game/player.h) */
+    bool adrenaline_rush;              /* +0x19E: +15 to hit at low health (bs/game/combat.h) */
 } bs_character;
 
 /* The character without one made (--level): level 1, 50 health, 50 spell points, every attribute and skill

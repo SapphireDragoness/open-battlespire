@@ -173,6 +173,14 @@ static void test_game_exe(void)
     BS_CHECK(strcmp(bs_exe_message(&text, BS_MSG_ATTRIBUTES), "strength") == 0);
     BS_CHECK(strcmp(bs_exe_message(&text, BS_MSG_ATTRIBUTES + 7), "luck") == 0);
     BS_CHECK(strcmp(bs_exe_message(&text, 543), "") == 0);
+    /* The keys' names, before the messages. */
+    bs_exe_text keys;
+    BS_CHECK_EQ_INT(bs_exe_key_names(&img, &a, &keys), BS_OK);
+    BS_CHECK_EQ_INT(keys.count, BS_KEY_NAMES);
+    BS_CHECK(strcmp(bs_exe_message(&keys, 0x01), "ESC") == 0);
+    BS_CHECK(strcmp(bs_exe_message(&keys, 0x39), "SPCBAR") == 0);
+    BS_CHECK(strcmp(bs_exe_message(&keys, 0x58), "F12") == 0);
+    BS_CHECK(strcmp(bs_exe_message(&text, BS_MSG_DUPLICATES), "You have duplicate definitions.") == 0);
     bs_arena_free(&a);
 }
 

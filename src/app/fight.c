@@ -44,10 +44,11 @@ void fight_free(fight *f)
     f->sprite_cap = 0;
 }
 
-static void play(const fight_env *env, int32_t id, const float pos[3])
+/* A sound at pos, following source (SOUND_FROM_*, or 0 to stay there); pos NULL: the player's own. */
+static void play(const fight_env *env, int32_t id, uint32_t source, const float pos[3])
 {
     if (id > 0)
-        bs_level_audio_play_at(env->audio, id, pos, env->listener, env->listener_yaw);
+        bs_level_audio_play_at(env->audio, id, source, pos, env->listener, env->listener_yaw);
 }
 
 /* A message with its %s filled in. */
@@ -300,6 +301,7 @@ static void player_fighter(const fight_env *env, bs_fighter *out, uint32_t *weap
     out->health = ch->health;
     out->health_max = ch->health_max;
     out->shield = ch->shield;
+    out->adrenaline_rush = ch->adrenaline_rush;
     *weapon_index = 15; /* bare hands */
     const bs_weapon_stats *ws = NULL;
     uint32_t w = env->items ? bs_items_weapon(env->items) : UINT32_MAX;
@@ -424,9 +426,7 @@ static void shoot(fight *f, const fight_env *env, const bs_scene_xform *nock)
     bs_item arrow;
     if (w == UINT32_MAX || !bs_items_take_arrow(env->items, &arrow))
         return;
-    float eye[3];
-    bs_player_eye(env->player, eye);
-    play(env, BS_ARROW_SHOOT_SOUND, eye);
+    play(env, BS_ARROW_SHOOT_SOUND, 0, NULL);
     bs_skill_used(env->character, BS_SKILL_MISSILE, 1); /* (0x49C6F) */
     bs_arrows_launch(&f->arrows, &arrow, nock->pos, view_pitch(env), body_yaw(env), nock->rot);
     bs_item bow = env->items->items[w].item;
@@ -454,7 +454,7 @@ static void arrow_hits(fight *f, const fight_env *env, const bs_arrow_hit *h, bs
         f->stuck[f->stuck_count].item = h->item;
         f->stuck_count++;
     }
-    play(env, BS_ARROW_HIT_SOUND, m->body.pos);
+    play(env, BS_ARROW_HIT_SOUND, SOUND_FROM_MONSTER(h->monster), m->body.pos);
     if (m->unhurt)
         return; /* level 5's Hernes (0x4A325) */
     env->message(env->ctx, bs_exe_message(env->text, BS_MSG_ARROW_HITS));
@@ -511,9 +511,7 @@ static void start_punch(fight *f, const fight_env *env, const bs_swing *s)
     f->punching = true;
     f->punch_struck = false;
     f->punch_start = env->now_ms;
-    float eye[3];
-    bs_player_eye(env->player, eye);
-    play(env, PUNCH_SOUND, eye);
+    play(env, PUNCH_SOUND, 0, NULL);
 }
 
 /* A weapon's swing (0x49521): after the wind-up, taking the time the weapon, skill, Strength and Speed
@@ -530,9 +528,7 @@ static void start_swing(fight *f, const fight_env *env, const bs_swing *s, uint3
         return;
     f->swing = *s;
     if (swing_sound[weapon] >= 0) {
-        float eye[3];
-        bs_player_eye(env->player, eye);
-        play(env, (uint32_t)swing_sound[weapon], eye);
+        play(env, (uint32_t)swing_sound[weapon], 0, NULL);
     }
 }
 
@@ -661,12 +657,12 @@ static void player_strikes(fight *f, const fight_env *env, bs_monster_events *ev
             env->message(env->ctx, bs_exe_message(env->text, hit.message));
         m->delay = -20;
         if (hit.outcome == BS_MELEE_MISS || hit.outcome == BS_MELEE_FUMBLE) {
-            play(env, bs_miss_sound(m->type, env->rng), eye);
+            play(env, bs_miss_sound(m->type, env->rng), 0, NULL);
             continue;
         }
         if (hit.outcome != BS_MELEE_HIT)
             continue;
-        play(env, bs_hit_sound(true, wi), eye);
+        play(env, bs_hit_sound(true, wi), 0, NULL);
         if (hit.stun)
             m->skip_attacks = 2;
         if (bs_monster_hurt(&f->monsters, i, &w, hit.damage, hit.force, env->player->pos, env->character->health, ev))
@@ -688,13 +684,13 @@ static void monster_strikes(fight *f, const fight_env *env, uint32_t i)
     bs_skill_used(env->character, BS_SKILL_DODGING, 1); /* each blow at the player counts (0x4284B) */
     env->character->shield = hit.shield;
     if (hit.outcome == BS_MELEE_MISS) {
-        play(env, bs_miss_sound(0, env->rng), m->body.pos);
+        play(env, bs_miss_sound(0, env->rng), SOUND_FROM_MONSTER(i), m->body.pos);
         return;
     }
     if (hit.outcome != BS_MELEE_HIT || hit.damage <= 0)
         return;
     m->delay = -30;
-    play(env, bs_hit_sound(false, m->type), m->body.pos);
+    play(env, bs_hit_sound(false, m->type), SOUND_FROM_MONSTER(i), m->body.pos);
     bs_character *ch = env->character;
     ch->health -= hit.damage;
     if (ch->health < 1) {
@@ -714,10 +710,8 @@ static void monster_strikes(fight *f, const fight_env *env, uint32_t i)
     }
     /* A cry of pain, mostly (0x437FD: rand() < 30000). */
     if (bs_rng_range(env->rng, 0, 32767) < 30000) {
-        float eye[3];
-        bs_player_eye(env->player, eye);
         bool female = env->db && env->db->female;
-        play(env, PAIN_SOUND + (female ? 2 : 0) + bs_rng_range(env->rng, 0, 1), eye);
+        play(env, PAIN_SOUND + (female ? 2 : 0) + bs_rng_range(env->rng, 0, 1), 0, NULL);
     }
 }
 
@@ -751,10 +745,8 @@ static void player_hurt(fight *f, const fight_env *env)
         return;
     }
     if (bs_rng_range(env->rng, 0, 32767) < 30000) {
-        float eye[3];
-        bs_player_eye(env->player, eye);
         bool female = env->db && env->db->female;
-        play(env, PAIN_SOUND + (female ? 2 : 0) + bs_rng_range(env->rng, 0, 1), eye);
+        play(env, PAIN_SOUND + (female ? 2 : 0) + bs_rng_range(env->rng, 0, 1), 0, NULL);
     }
 }
 
@@ -764,7 +756,7 @@ static void magic_events(fight *f, const fight_env *env, const bs_magic_events *
         const bs_magic_event *e = &ev->list[k];
         switch (e->kind) {
         case BS_MAGIC_SOUND:
-            play(env, e->value, e->pos);
+            play(env, e->value, 0, e->pos);
             break;
         case BS_MAGIC_MESSAGE:
             message_args(env, (uint32_t)e->value, e->args);
@@ -791,7 +783,7 @@ static void monster_events(fight *f, const fight_env *env, bs_monster_events *ev
             continue;
         switch (e.kind) {
         case BS_MONSTER_SOUND:
-            play(env, e.value, f->monsters.list[e.monster].body.pos);
+            play(env, e.value, SOUND_FROM_MONSTER(e.monster), f->monsters.list[e.monster].body.pos);
             break;
         case BS_MONSTER_STRIKE:
             monster_strikes(f, env, e.monster);

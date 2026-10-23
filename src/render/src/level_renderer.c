@@ -12,6 +12,8 @@
 #define MAX_LIGHTS 256
 #define CLASSIC_W 320  /* the game renders its 3D view at 320x240 and doubles each pixel (measured) */
 #define CLASSIC_H 240
+#define TARGET_W 640   /* the classic target's size: the largest view, high resolution */
+#define TARGET_H 480
 #define PLAYER_LIGHT_LEVELS 40.0f    /* measured in two memory dumps */
 #define PLAYER_LIGHT_RADIUS 384.0f
 #define BHDR_FRAME_MS 8              /* BSI header field 8: frame time in ms (inferred; 71 like FLIC) */
@@ -397,13 +399,13 @@ static bool make_classic_target(bs_level_renderer *r)
     glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
     glGenTextures(1, &r->fbo_color);
     glBindTexture(GL_TEXTURE_2D, r->fbo_color);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, CLASSIC_W, CLASSIC_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, TARGET_W, TARGET_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->fbo_color, 0);
     glGenRenderbuffers(1, &r->fbo_depth);
     glBindRenderbuffer(GL_RENDERBUFFER, r->fbo_depth);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, CLASSIC_W, CLASSIC_H);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, TARGET_W, TARGET_H);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, r->fbo_depth);
     bool ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -748,15 +750,18 @@ static void draw_dynamic_sprite(bs_level_renderer *r, const bs_level_sprite *sp)
     glDrawArrays(GL_TRIANGLES, 0, 6);
 }
 
-static void draw_scene(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int w, int h,
-                       double time)
+/* Draws into the bound framebuffer's rectangle (x0, y0, w, h), GL's way up. */
+static void draw_scene(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int x0, int y0,
+                       int w, int h, double time)
 {
     float aspect = (float)w / (float)(h > 0 ? h : 1);
     float mvp[16], fwd[3], right[3], up[3];
     view_projection(cam, aspect, mvp);
     camera_basis(cam, fwd, right, up);
 
-    glViewport(0, 0, w, h);
+    glViewport(x0, y0, w, h);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(x0, y0, w, h);
     glClearColor(s->fog_color[0], s->fog_color[1], s->fog_color[2], 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glActiveTexture(GL_TEXTURE0);
@@ -867,32 +872,45 @@ static void draw_scene(bs_level_renderer *r, const bs_camera *cam, const bs_rend
         glUniformMatrix4fv(r->geometry.model, 1, GL_FALSE, identity4);
     }
     glBindVertexArray(0);
+    glDisable(GL_SCISSOR_TEST);
 }
 
-/* Draws at the classic size and scales it into the 640x480 screen's rectangle (x, y, w, h), letterboxed in
- * the window. */
-static void draw_classic(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int width,
-                         int height, double time, int sx, int sy, int sw, int sh)
+/* The 640x480 screen's rectangle (sx, sy, sw, sh) in a width x height window, the screen letterboxed to 4:3:
+ * out = x, y (GL's way up), w, h. Clears the window to black. */
+static void window_rect(int width, int height, int sx, int sy, int sw, int sh, int out[4])
 {
-    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
-    draw_scene(r, cam, s, CLASSIC_W, CLASSIC_H, time);
-
-    /* The screen in the window, keeping 4:3. */
-    int w = width, h = width * CLASSIC_H / CLASSIC_W;
+    int w = width, h = width * 3 / 4;
     if (h > height) {
         h = height;
-        w = height * CLASSIC_W / CLASSIC_H;
+        w = height * 4 / 3;
     }
     int x = (width - w) / 2, y = (height - h) / 2;
     int x0 = x + sx * w / 640, x1 = x + (sx + sw) * w / 640;
-    int y1 = y + h - sy * h / 480, y0 = y + h - (sy + sh) * h / 480; /* GL counts from the bottom */
+    int y1 = y + h - sy * h / 480, y0 = y + h - (sy + sh) * h / 480;
+    out[0] = x0;
+    out[1] = y0;
+    out[2] = x1 - x0;
+    out[3] = y1 - y0;
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, width, height);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
+}
+
+/* Draws at rw x rh and scales it into the 640x480 screen's rectangle (x, y, w, h), letterboxed in the
+ * window. */
+static void draw_classic(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int width,
+                         int height, double time, int sx, int sy, int sw, int sh, int rw, int rh)
+{
+    rw = rw < 1 ? 1 : rw > TARGET_W ? TARGET_W : rw;
+    rh = rh < 1 ? 1 : rh > TARGET_H ? TARGET_H : rh;
+    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    draw_scene(r, cam, s, 0, 0, rw, rh, time);
+    int d[4];
+    window_rect(width, height, sx, sy, sw, sh, d);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-    glBlitFramebuffer(0, 0, CLASSIC_W, CLASSIC_H, x0, y0, x1, y1, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBlitFramebuffer(0, 0, rw, rh, d[0], d[1], d[0] + d[2], d[1] + d[3], GL_COLOR_BUFFER_BIT, GL_NEAREST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -903,10 +921,24 @@ void bs_level_renderer_draw(bs_level_renderer *r, const bs_camera *cam, const bs
         apply_filters(r, s->classic);
     if (!s->classic) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        draw_scene(r, cam, s, width, height, time);
+        draw_scene(r, cam, s, 0, 0, width, height, time);
         return;
     }
-    draw_classic(r, cam, s, width, height, time, 0, 0, 640, 480);
+    draw_classic(r, cam, s, width, height, time, 0, 0, 640, 480, CLASSIC_W, CLASSIC_H);
+}
+
+void bs_level_renderer_draw_view(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int width,
+                                 int height, double time, int x, int y, int w, int h, int rw, int rh)
+{
+    if (r->classic_filters != s->classic)
+        apply_filters(r, s->classic);
+    if (s->classic) {
+        draw_classic(r, cam, s, width, height, time, x, y, w, h, rw, rh);
+        return;
+    }
+    int d[4];
+    window_rect(width, height, x, y, w, h, d);
+    draw_scene(r, cam, s, d[0], d[1], d[2], d[3], time);
 }
 
 void bs_level_renderer_draw_inset(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int width,
@@ -914,7 +946,7 @@ void bs_level_renderer_draw_inset(bs_level_renderer *r, const bs_camera *cam, co
 {
     if (r->classic_filters != s->classic)
         apply_filters(r, s->classic);
-    draw_classic(r, cam, s, width, height, time, x, y, w, h);
+    draw_classic(r, cam, s, width, height, time, x, y, w, h, CLASSIC_W, CLASSIC_H);
 }
 
 bs_result bs_level_renderer_set_water(bs_level_renderer *r, const bs_bsi_image *image, float height)

@@ -18,7 +18,6 @@ static const int exit_button[4] = {590, 427, 634, 473};   /* Esc */
 #define PAGE_Y 160                    /* which slots these are (ours) */
 #define SLIDE_MS 200
 #define FRAME_MS 60
-#define DOUBLE_CLICK_MS 400
 #define MSG_ENTER_NAME "Enter name of save game."
 
 static bool in(const int r[4], int x, int y)
@@ -198,7 +197,7 @@ loadsave_result loadsave_event(loadsave *ls, const loadsave_env *env, const SDL_
         if (!in(r, x, y))
             continue;
         pick(ls, env, n);
-        bool twice = ls->click_at == n && env->now_ms - ls->click_ms < DOUBLE_CLICK_MS;
+        bool twice = ls->click_at == n && env->now_ms - ls->click_ms < env->double_click_ms;
         ls->click_at = n;
         ls->click_ms = env->now_ms;
         return twice ? go(ls, env) : LOADSAVE_NOTHING; /* (0x31539) */

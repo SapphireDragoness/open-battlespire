@@ -63,6 +63,8 @@ bs_melee bs_melee_roll(const bs_fighter *att, const bs_fighter *def, int32_t ski
     int32_t defence = def->weapon_skill + def->luck / 10 + def->agility / 5;
     int32_t chance = (attack - defence) / 2 + 50;
     chance -= chance * (def->dodge / 5) / 100;
+    if (att->adrenaline_rush && att->health <= att->health_max * 25 / 256)
+        chance += 15; /* 0x4285B */
     chance = clamp(chance, 5, 95);
     int32_t critical = att->critical / 7 + chance / 20;
     int32_t good = chance / 5;

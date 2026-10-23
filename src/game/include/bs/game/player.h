@@ -57,8 +57,7 @@ typedef struct bs_player_input {
     bool jump;            /* held: charges a jump; released: jumps */
     bool duck;            /* the eye drops to 35 */
     bool sneak;           /* halves the walking speeds (the game's +0x226 bit 0x40, set by Sneak Mode) */
-    bool run;             /* the player record flag +0x199: the "Running" spell's effect (the game has
-                             no run key) */
+    bool athleticism;     /* the class advantage (+0x199): walking x 538/256, jumps higher and farther */
     bool jumping;         /* +0x174 bit 0x40: the "Jumping" spell's effect, a jump's forward speed x 330/256 */
     bool slow_fall;       /* +0x173 bit 1: the "Slow Fall" spell's effect, falls at most 60 units/s */
     float walk_speed;     /* if > 0, the forward speed in units/s instead of the one from Speed (monsters walk
@@ -70,6 +69,9 @@ typedef struct bs_player_input {
     bool heavy;           /* carrying more than 3 x Strength in half units: no staying afloat (0x5493B) */
     bs_player_ride ride;
     float ride_heading;   /* a boat: the way it goes (radians, as yaw) */
+    float cursor_forward; /* Cursor movement (bs_cursor_steer_of): units/s along the heading (a boat's when
+                             riding one), - back; added to the keys' */
+    float cursor_strafe;  /* units/s to the right of the player's yaw, on a boat too */
 } bs_player_input;
 
 typedef struct bs_player {
@@ -111,5 +113,31 @@ void bs_player_eye(const bs_player *p, float out[3]);
 /* While charging, where the game shows the jump pointer: jump_distance ahead
  * of the feet in the facing direction, 50 units up. Returns false otherwise. */
 bool bs_player_jump_target(const bs_player *p, float out[3]);
+
+/*
+ * Cursor movement, the Controls screen's alternative to View (0x41AA7, 0x41C04; docs/re/README.md,
+ * "Cursor movement"). The screen (640x480) down to the bar's top is cut into nine zones: three rows (the
+ * top 35 %, the middle, the bottom 25 %) by three columns (x up to 250, up to 390, beyond). With the left
+ * button held, a top zone goes forward (turning too in the corners), a middle one turns, a bottom one
+ * steps left, back or right; the centre does nothing (Select works only there). The pointer shows the
+ * zone's arrow, direc<zone>.bsi.
+ */
+#define BS_CURSOR_OFF 100     /* below the bottom: the usual pointer, no movement */
+
+/* The zone (0-8, row by row from the top left, or BS_CURSOR_OFF) of a screen point; bottom is the bar's
+ * top (380), or 479 in the full view. *amount is how far into a side column the point is, what the turns
+ * go by: (250 - x) / 250 on the left, (x - 390) / 250 on the right; it isn't set in the middle column. */
+int bs_cursor_zone(int x, int y, int bottom, float *amount);
+
+typedef struct bs_cursor_steer {
+    float turn;      /* radians a second, + right: 4 x the turn rate x amount angle units (2048 a turn) */
+    float forward;   /* units/s, - back: Speed + 200 forward, Speed + 100 back */
+    float strafe;    /* units/s, + right: Speed + 100 */
+} bs_cursor_steer;
+
+/* What a zone does with the left button held. speed is the Speed attribute (+0x38), turn_rate the player's
+ * +0x2E0. Sneak Mode, and swimming or the balloon, halve the speeds as they do the keys' (bs_player_move);
+ * nothing else changes them. */
+bs_cursor_steer bs_cursor_steer_of(int zone, float amount, int32_t speed, int32_t turn_rate);
 
 #endif

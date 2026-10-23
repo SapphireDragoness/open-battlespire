@@ -49,7 +49,6 @@ static const char *const race_codes[6] = {"rd", "br", "no", "hi", "dk", "wd"};
 #define FRAME_DY (-4)
 #define FRAME_MS 60                      /* its animation (a guess) */
 #define SLIDE_MS 200                     /* moving to another race (0x2093A; a guess) */
-#define DOUBLE_CLICK_MS 400
 
 /* ---- Load Game (load00.bsi, buttons 0xEDC52, drawn by 0x325B9) ---- */
 
@@ -515,7 +514,7 @@ void creation_start(creation *cr, const creation_env *env)
 
 static bool double_click(creation *cr, const creation_env *env, int target)
 {
-    bool d = cr->click_at == target && env->now_ms - cr->click_ms < DOUBLE_CLICK_MS;
+    bool d = cr->click_at == target && env->now_ms - cr->click_ms < env->double_click_ms;
     cr->click_at = target;
     cr->click_ms = env->now_ms;
     return d;

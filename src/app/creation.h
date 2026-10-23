@@ -88,6 +88,7 @@ typedef struct creation_env {
     uint32_t picture_count;
     bs_rng *rng;
     uint64_t now_ms;
+    uint32_t double_click_ms;                  /* the Controls screen's (controls_double_click_ms) */
     menus *help;                               /* its help pages */
     const char *save_root;                     /* the install, holding SAVE0 .. SAVE9; NULL: none */
     const char *saves_dir;                     /* ours (loadsave.h); NULL: none */

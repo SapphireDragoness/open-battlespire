@@ -64,6 +64,12 @@ bs_result bs_level_renderer_set_water(bs_level_renderer *r, const bs_bsi_image *
 void bs_level_renderer_draw(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int width,
                             int height, double time);
 
+/* Draws the view into the rectangle (x, y, w, h) of the 640x480 screen, letterboxed in the window; the rest
+ * of the window is black. Classic mode renders at rw x rh (at most 640 x 480) and scales that up, as the
+ * game does with its Screen Size and Resolution; enhanced mode at the window's resolution. */
+void bs_level_renderer_draw_view(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int width,
+                                 int height, double time, int x, int y, int w, int h, int rw, int rh);
+
 /* Draws the view small, into the rectangle (x, y, w, h) of the 640x480 screen (letterboxed in the window);
  * the rest of the window is black. The help screens show the game this way (0x20A95). */
 void bs_level_renderer_draw_inset(bs_level_renderer *r, const bs_camera *cam, const bs_render_settings *s, int width,

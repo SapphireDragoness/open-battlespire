@@ -21,6 +21,11 @@
 #include "bs/render/level_renderer.h"
 #include "bs/render/overlay.h"
 
+/* Sound sources the level audio follows (bs_level_audio_play_at): a monster or a level logic object, by
+ * index. Resolved by main.c's sound_source(). */
+#define SOUND_FROM_MONSTER(i) (0x1000000u | (uint32_t)(i))
+#define SOUND_FROM_OBJECT(i) (0x2000000u | (uint32_t)(i))
+
 /*
  * The monsters of a level and the fighting (docs/formats/creatures.md): spawns
  * them when a level loads, runs them every frame, draws their sprites, and

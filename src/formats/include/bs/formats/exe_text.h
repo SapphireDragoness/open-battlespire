@@ -29,6 +29,10 @@ enum {
     BS_MSG_REELING = 113,           /* "You send your opponent reeling." */
     BS_MSG_NO_DAMAGE = 114,         /* "You dont seem to be doing any damage." */
     BS_MSG_DIES = 115,              /* "%s dies..." */
+    BS_MSG_PRESS_KEY = 89,          /* "Press desired key or mouse button..." */
+    BS_MSG_DUPLICATES = 90,         /* "You have duplicate definitions." */
+    BS_MSG_HIT_KEY = 91,            /* "Hit the key or mouse button you wish to assign to this function." */
+    BS_MSG_KEY_RESERVED = 92,       /* "That key is already used by the program." */
     BS_MSG_POTION_RESTORATION = 240,     /* "Potion of Restoration (%d)" */
     BS_MSG_POTION_WATER_BREATHING = 241, /* "Potion of Water Breathing (%d)" */
     BS_MSG_POTION_OF = 242,         /* "%s of %s (%d)": a potion, its spell, how many */
@@ -62,6 +66,11 @@ bs_result bs_exe_text_read(const bs_le_image *img, bs_arena *arena, bs_exe_text 
  */
 bs_result bs_exe_string_table(const bs_le_image *img, const char *first, uint32_t max, bs_arena *arena,
                               bs_exe_text *out);
+
+/* The keys' names by PC scan code (set 1), 0 .. 0x58: "ESC", "1" .. "F12" (0xE80C5 in v1.5, just before the
+ * messages). The Controls screen shows them; some codes have "". */
+#define BS_KEY_NAMES 0x59
+bs_result bs_exe_key_names(const bs_le_image *img, bs_arena *arena, bs_exe_text *out);
 
 /* Message i, or "" if there is none. */
 const char *bs_exe_message(const bs_exe_text *t, uint32_t i);

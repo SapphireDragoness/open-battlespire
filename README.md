@@ -81,7 +81,20 @@ books the spell book and the automap (F11), the chest the inventory, the
 gears the options bar (Esc), the compass lists your hot keys and "?" shows
 the help pages. Tab hides the bar for the full view. F toggles flying, G
 classic/enhanced rendering. End Game in the options bar goes back to the
-title.
+title. Screen Size there makes the view smaller (centred on a stone wall,
+as the original's) and picks LOW or HIGH resolution, which classic rendering
+draws at half or full size. Controls sets any of the game's 26 actions to a
+key or mouse button (click its box, then press it), the mouse's sensitivity
+and Mouse Reverse, the double-click time and the turn rate for the turning
+keys; Default puts the keys back. Its Cursor movement leaves the mouse free
+instead of looking around: hold the left button over the view and you go
+where the pointer's arrow says (forward at the top, turning at the sides,
+stepping back or aside at the bottom), and a click on the cross in the middle
+uses. Both screens' settings are kept in `settings.ini` in your data
+folder. L switches your lantern off and on. Your class's advantages work as
+the original's: Athleticism makes you faster and jump further, Acute Hearing
+makes sounds carry further, and Adrenaline Rush helps you hit when you're
+nearly dead.
 
 There is no experience: as in the original, finishing a level opens the
 level-up screen with points to spend (600 after level 1, up to 1900 after

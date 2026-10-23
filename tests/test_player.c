@@ -156,6 +156,78 @@ static void test_walk_speed(void)
     BS_CHECK(fabsf(p.pos[2] - 1000 - 213) < 2 && fabsf(p.pos[1]) < 0.01f && p.on_ground);
 }
 
+/* Athleticism: base 50 * 435 / 256 = 84, + 84 * 282 / 256 = 176, so 304 units a second forward. */
+static void test_athleticism(void)
+{
+    setup();
+    bs_player p;
+    bs_player_init(&p, (const float[3]){-1000, 0, 1000}, 0);
+    bs_player_input in = {.athleticism = true};
+    bs_player_events ev;
+    run(&p, &in, 1, &ev);
+    in.forward = 1;
+    run(&p, &in, 50, &ev);
+    BS_CHECK(fabsf(p.pos[2] - 1000 - 304) < 2 && p.on_ground);
+}
+
+/* Cursor movement's zones (0x41AA7): rows end 35 % and 75 % of the way to the bar, columns at x 250 and 390. */
+static void test_cursor_zones(void)
+{
+    float a = -1;
+    BS_CHECK_EQ_INT(bs_cursor_zone(0, 0, 380, &a), 0);
+    BS_CHECK(fabsf(a - 1.0f) < 1e-6f);
+    BS_CHECK_EQ_INT(bs_cursor_zone(320, 132, 380, &a), 1);   /* 380 x 35 / 100 = 133 */
+    BS_CHECK_EQ_INT(bs_cursor_zone(320, 133, 380, &a), 4);
+    BS_CHECK_EQ_INT(bs_cursor_zone(250, 200, 380, &a), 3);
+    BS_CHECK(fabsf(a) < 1e-6f);
+    BS_CHECK_EQ_INT(bs_cursor_zone(391, 200, 380, &a), 5);
+    BS_CHECK(fabsf(a - 1.0f / 250) < 1e-6f);
+    BS_CHECK_EQ_INT(bs_cursor_zone(320, 284, 380, &a), 4);   /* 380 - 95 = 285 */
+    BS_CHECK_EQ_INT(bs_cursor_zone(320, 285, 380, &a), 7);
+    BS_CHECK_EQ_INT(bs_cursor_zone(639, 380, 380, &a), 8);
+    BS_CHECK_EQ_INT(bs_cursor_zone(639, 381, 380, &a), BS_CURSOR_OFF);
+    BS_CHECK_EQ_INT(bs_cursor_zone(10, 450, 479, &a), 6);    /* the full view: down to the bottom */
+}
+
+/* What the zones do (0x41C04): Speed 50 goes forward at 250 units/s, back and aside at 150; at the screen's
+ * edge the turn rate 128 turns 512 angle units a second. */
+static void test_cursor_steer(void)
+{
+    bs_cursor_steer s = bs_cursor_steer_of(0, 1.0f, 50, 128);
+    BS_CHECK(fabsf(s.forward - 250) < 1e-3f && s.strafe == 0);
+    BS_CHECK(fabsf(s.turn + 512 * 2 * 3.14159265f / 2048) < 1e-4f);
+    s = bs_cursor_steer_of(5, 0.5f, 50, 128);
+    BS_CHECK(s.forward == 0 && fabsf(s.turn - 256 * 2 * 3.14159265f / 2048) < 1e-4f);
+    s = bs_cursor_steer_of(7, 0, 50, 128);
+    BS_CHECK(fabsf(s.forward + 150) < 1e-3f && s.turn == 0);
+    s = bs_cursor_steer_of(6, 0, 50, 128);
+    BS_CHECK(fabsf(s.strafe + 150) < 1e-3f && s.forward == 0);
+    s = bs_cursor_steer_of(4, 0, 50, 128);
+    BS_CHECK(s.forward == 0 && s.strafe == 0 && s.turn == 0);
+    s = bs_cursor_steer_of(BS_CURSOR_OFF, 0, 50, 128);
+    BS_CHECK(s.forward == 0 && s.strafe == 0 && s.turn == 0);
+}
+
+/* The steering moves the player like the keys, halved by Sneak Mode, with neither Athleticism nor the keys'
+ * speeds. */
+static void test_cursor_move(void)
+{
+    setup();
+    bs_player p;
+    bs_player_init(&p, (const float[3]){-1000, 0, 1000}, 0);
+    bs_player_input in = {.athleticism = true};
+    bs_player_events ev;
+    run(&p, &in, 1, &ev);
+    in.cursor_forward = 250;
+    run(&p, &in, 50, &ev);
+    BS_CHECK(fabsf(p.pos[2] - 1000 - 250) < 2 && fabsf(p.pos[0] + 1000) < 0.01f);
+    in.cursor_forward = 0;
+    in.cursor_strafe = 150;
+    in.sneak = true;
+    run(&p, &in, 50, &ev);
+    BS_CHECK(fabsf(p.pos[0] + 1000 - 75) < 2 && fabsf(p.pos[2] - 1250) < 2);
+}
+
 /* A wall stops the body (radius up to 16) and the body slides along it. */
 static void test_wall(void)
 {
@@ -430,6 +502,10 @@ int main(void)
     BS_RUN(test_slow_fall);
     BS_RUN(test_jumping_effect);
     BS_RUN(test_walk_speed);
+    BS_RUN(test_athleticism);
+    BS_RUN(test_cursor_zones);
+    BS_RUN(test_cursor_steer);
+    BS_RUN(test_cursor_move);
     BS_RUN(test_wall);
     BS_RUN(test_steps);
     BS_RUN(test_jump);

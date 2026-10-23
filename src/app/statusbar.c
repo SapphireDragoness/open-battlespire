@@ -120,3 +120,8 @@ bool statusbar_covers(const statusbar *s, int x, int y)
     (void)x;
     return !s->full_view && y >= BAR_TOP;
 }
+
+int statusbar_view_bottom(const statusbar *s)
+{
+    return s->full_view ? 479 : BAR_TOP;
+}

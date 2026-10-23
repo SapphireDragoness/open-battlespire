@@ -68,9 +68,44 @@ static void test_place(void)
     BS_CHECK(near(p.gain, 1) && near(p.pan, 0));
 }
 
+static void test_acute_hearing(void)
+{
+    BS_CHECK_EQ_INT(bs_sound_max_distance(BS_SOUND_RANGE_NEAR, false), BS_SOUND_DISTANCE_NEAR);
+    BS_CHECK_EQ_INT(bs_sound_max_distance(BS_SOUND_RANGE_FAR, false), BS_SOUND_DISTANCE_FAR);
+    BS_CHECK_EQ_INT(bs_sound_max_distance(BS_SOUND_RANGE_NEAR, true), 1024);
+    BS_CHECK_EQ_INT(bs_sound_max_distance(BS_SOUND_RANGE_FAR, true), 10320);
+    /* 500 away: 127 - 500 * 127 / 768 = 45 without, 127 - 500 * 127 / 1024 = 65 with. */
+    const float o[3] = {0, 0, 0}, at[3] = {500, 0, 0};
+    bs_sound_place p;
+    BS_CHECK(bs_sound_place_at(o, 0, at, bs_sound_max_distance(BS_SOUND_RANGE_NEAR, false), false, &p));
+    BS_CHECK(near(p.gain, 45.0f / 127));
+    BS_CHECK(bs_sound_place_at(o, 0, at, bs_sound_max_distance(BS_SOUND_RANGE_NEAR, true), false, &p));
+    BS_CHECK(near(p.gain, 65.0f / 127));
+}
+
+static void test_follow(void)
+{
+    const float o[3] = {0, 0, 0};
+    bs_sound_place p;
+    /* Within 25 units: full and centred, though the source is to the side. */
+    BS_CHECK(bs_sound_follow(o, 0, (const float[3]){20, 0, 0}, 768, false, &p));
+    BS_CHECK(near(p.gain, 1) && near(p.pan, 0));
+    /* Otherwise as at the start. */
+    BS_CHECK(bs_sound_follow(o, 0, (const float[3]){100, 0, 0}, 768, false, &p));
+    BS_CHECK(near(p.gain, 111.0f / 127) && near(p.pan, 1));
+    /* At the max distance it goes silent but plays on; beyond, a one-shot stops and a loop stays silent. */
+    BS_CHECK(bs_sound_follow(o, 0, (const float[3]){768, 0, 0}, 768, false, &p));
+    BS_CHECK(near(p.gain, 0));
+    BS_CHECK(!bs_sound_follow(o, 0, (const float[3]){769, 0, 0}, 768, false, &p));
+    BS_CHECK(bs_sound_follow(o, 0, (const float[3]){769, 0, 0}, 768, true, &p));
+    BS_CHECK(near(p.gain, 0));
+}
+
 int main(void)
 {
     BS_RUN(test_distance);
     BS_RUN(test_place);
+    BS_RUN(test_acute_hearing);
+    BS_RUN(test_follow);
     return BS_TEST_RESULT();
 }

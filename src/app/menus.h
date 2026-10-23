@@ -14,6 +14,7 @@
 #include "bs/game/levelling.h"
 #include "bs/game/use.h"
 #include "bs/render/overlay.h"
+#include "controls.h"
 
 /*
  * The screens the interface bar's buttons open (docs/re/README.md, "The bar's screens"); the world
@@ -29,8 +30,15 @@
  * - The automap (0x57415, F11): map030.bsi with the level's map (bs_automap_table) where the player
  *   has been, 16-pixel cells revealed around them, and the player's blinking marker.
  * - The options bar (0x2EA54): options.bsi in place of the bar: Fullscreen (the full view), the
- *   sound and music volumes, End Game and Drop to DOS (each asked "Are you sure?", sure00.bsi), Exit
- *   and help. Screen Size, Controls, Load and Save aren't there yet.
+ *   sound and music volumes, End Game and Drop to DOS (each asked "Are you sure?", sure00.bsi), Load,
+ *   Save, Screen Size, Controls, Exit and help.
+ * - Screen Size (0x2ED23): screen00.bsi over the options bar: the resolution (LOW draws the view at half
+ *   size and doubles it), the view's size (a slider of 1 .. 7; 7 is the whole screen) and Done (Esc).
+ *   A view smaller than the screen is centred on it, with backscrn.bsi around it (menus_draw_view_border).
+ * - Controls (0x1F481): controls.bsi, the whole screen: the 26 actions' keys in three columns (a click,
+ *   then the key or mouse button to set; Esc and F1-F8 are kept, and keys used twice show red), Mouse
+ *   Reverse, the mouse's X and Y sensitivity, the double-click time and the turn rate as sliders,
+ *   Movement View or Cursor, Default, Exit (Esc; refused while a key is used twice) and help.
  */
 
 #define MENU_FONTS 11                 /* FONT0001 .. FONT0010 by number; 0 unused */
@@ -43,6 +51,8 @@ typedef enum menu_kind {
     MENU_SHEET,
     MENU_AUTOMAP,
     MENU_OPTIONS,
+    MENU_SCREEN_SIZE,    /* over the options bar */
+    MENU_CONTROLS,       /* from the options bar */
 } menu_kind;
 
 typedef enum menu_action {
@@ -55,7 +65,9 @@ typedef enum menu_action {
     MENU_QUIT,           /* Drop to DOS, confirmed */
     MENU_LOAD,           /* Load (0x2EF60): the load screen; the bar is closed */
     MENU_SAVE,           /* Save (0x2EF9A) */
-    MENU_NOT_THERE,      /* Screen Size, Controls */
+    MENU_VIEW,           /* Screen Size changed the view's size or resolution */
+    MENU_SCREEN_DONE,    /* Screen Size's Done: the game keeps the settings (screen.dat, 0x2EEFD) */
+    MENU_CONTROLS_DONE,  /* Controls' Exit: the game keeps them (controls.dat, 0x1F757) */
 } menu_action;
 
 typedef struct menu_env {
@@ -75,6 +87,9 @@ typedef struct menu_env {
     int32_t player_yaw;               /* 2048 a turn */
     bool full_view;
     uint64_t now_ms;
+    /* The Controls screen: the bindings it changes, the keys' names (bs_exe_key_names). */
+    controls *keys;
+    const bs_exe_text *key_names;
     /* Messages the level-up screen gives (the game's message table). */
     const bs_exe_text *text;
     void (*message)(void *ctx, const char *text);
@@ -90,8 +105,11 @@ typedef struct menus {
     int skill_scroll;
     bool level_up;                    /* the sheet is the level-up screen (0x3FC1EE) */
     bs_level_up lu;
-    int dragging;                     /* the volume slider held: 0 sound, 1 music, -1 none */
+    int dragging;                     /* the slider held: 0 sound, 1 music, CONTROLS_SLIDER_* , -1 none */
+    int capturing;                    /* Controls: the action waiting for its key, -1 none */
     int sound_volume, music_volume;   /* 0..127 (0xDA404, 0xDA400) */
+    int view_size;                    /* 0..7, 7 the whole screen (0x3E936C) */
+    bool low_resolution;              /* the view drawn at half size and doubled (0x16C200) */
 } menus;
 
 void menus_init(menus *m);
@@ -114,6 +132,13 @@ void menus_draw(const menus *m, const menu_env *env, bs_overlay *o);
 /* Where the game shows on the screen while a screen is open: the whole view (the options bar), a small
  * window (help: r = x, y, w, h), or nothing (full-screen pages). Returns 0 nothing, 1 whole, 2 small. */
 int menus_view(const menus *m, int r[4]);
+
+/* The game's view on the 640x480 screen for the view size and resolution (0x3EC12): r = x, y, w, h, and
+ * the size it is drawn at (half of w x h at low resolution). */
+void menus_view_rect(const menus *m, int r[4], int *draw_w, int *draw_h);
+
+/* backscrn.bsi around a view smaller than the screen, and the black frame on its edge (0x3EF4B, 0x54D0F). */
+void menus_draw_view_border(const menus *m, const menu_env *env, bs_overlay *o);
 
 /* Reveals the automap's cells around a level point (0x57AC2). */
 void automap_reveal(uint8_t revealed[AUTOMAP_COLS * AUTOMAP_ROWS], const bs_automap_entry *map, float x, float z);

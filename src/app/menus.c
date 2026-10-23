@@ -74,6 +74,41 @@ static const int options_buttons[OPT_COUNT][4] = {
 static const int confirm_yes[4] = {209, 217, 278, 243};
 static const int confirm_no[4] = {342, 217, 410, 243};
 
+/* ---- Screen Size (0x2ED23, drawn by 0x2ED97) ---- */
+
+/* 0xED9D9: Resolution, the size slider, Done (Esc); x0, y0, x1, y1 inclusive. */
+static const int screen_resolution[4] = {317, 179, 430, 209};
+static const int screen_slider[4] = {323, 234, 434, 248};
+static const int screen_done[4] = {254, 287, 389, 323};
+#define SCREEN_SLIDER_STEP 16         /* the size is (x - 323) / 16 + 1 (0x2EE93) */
+#define VIEW_FULL 7
+
+/* ---- Controls (0x1F481, drawn by 0x1F89A) ---- */
+
+/* 0xED3B8: x0, y0, x1, y1 inclusive. */
+static const int controls_reverse[4] = {592, 80, 624, 96};
+static const int controls_sliders[4][4] = {
+    {468, 132, 622, 140},             /* mouse sensitivity X */
+    {468, 148, 622, 156},             /* Y */
+    {452, 196, 620, 204},             /* double-click time */
+    {452, 244, 620, 252},             /* turn rate */
+};
+static const int controls_columns[3][4] = {{176, 16, 240, 416}, {368, 16, 432, 416}, {560, 16, 624, 32}};
+static const int controls_default_button[4] = {256, 416, 366, 453};
+static const int controls_view[4] = {451, 311, 525, 337};
+static const int controls_cursor[4] = {548, 311, 621, 337};
+static const int controls_exit[4] = {576, 416, 639, 479};
+static const int controls_help[4] = {616, 2, 637, 22};
+#define CONTROLS_HELP 21
+#define CONTROLS_ROW 32               /* the key boxes: 64 x 16, 32 apart, 12 to a column */
+#define CONTROLS_COLUMN_ROWS 12
+#define CONTROLS_BOX_W 64
+#define CONTROLS_BOX_H 16
+#define CONTROLS_SLIDER_FIRST 2       /* menus.dragging for the four sliders: 2 .. 5 */
+#define CONTROLS_SLIDER_H 9
+#define CONTROLS_SLIDER_RED 0xFF0000FFu    /* 0x7C00 */
+#define CONTROLS_CAPTURE_RED 0xA40000FFu   /* the box waiting for its key: 0x5000 */
+
 static bool in(const int r[4], int x, int y)
 {
     return x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3];
@@ -90,7 +125,11 @@ void menus_init(menus *m)
     memset(m, 0, sizeof *m);
     m->auto_help = true;
     m->dragging = -1;
+    m->capturing = -1;
     m->sound_volume = m->music_volume = 127;
+    /* Without screen.dat the game starts with the whole screen at low resolution (0x10576). */
+    m->view_size = VIEW_FULL;
+    m->low_resolution = true;
 }
 
 void menus_open(menus *m, menu_kind k)
@@ -98,6 +137,7 @@ void menus_open(menus *m, menu_kind k)
     m->open = k;
     m->confirm = MENU_NOTHING;
     m->dragging = -1;
+    m->capturing = -1;
     if (k == MENU_SHEET) {
         m->skill_scroll = 0;
         m->level_up = false;
@@ -241,10 +281,106 @@ static menu_action options_click(menus *m, const menu_env *env, int x, int y)
         case OPT_HELP:
             menus_help(m, OPTIONS_HELP, 1);
             return MENU_NOTHING;
+        case OPT_SCREEN_SIZE:
+            m->open = MENU_SCREEN_SIZE;
+            return MENU_NOTHING;
+        case OPT_CONTROLS:
+            m->open = MENU_CONTROLS;
+            m->capturing = -1;
+            if (env->keys && env->keys->turn_rate < CONTROLS_TURN_RATE_MIN)
+                env->keys->turn_rate = CONTROLS_TURN_RATE_MIN; /* 0x1F494 */
+            return MENU_NOTHING;
         default:
-            return MENU_NOT_THERE;
+            return MENU_NOTHING;
         }
     }
+    return MENU_NOTHING;
+}
+
+/* Exit (0x1F757): not while a key is used twice. */
+static menu_action controls_exit_screen(menus *m, const menu_env *env)
+{
+    if (env->keys && controls_any_duplicate(env->keys)) {
+        if (env->message && env->text)
+            env->message(env->ctx, bs_exe_message(env->text, BS_MSG_DUPLICATES));
+        return MENU_NOTHING;
+    }
+    m->open = MENU_OPTIONS;
+    m->dragging = -1;
+    return MENU_CONTROLS_DONE;
+}
+
+/* A Controls slider at x (0x1F54C, 0x1F5AA, 0x1F6A8, 0x1F7D5). */
+static void controls_slide(controls *c, int slider, int x)
+{
+    const int *r = controls_sliders[slider];
+    x = x < r[0] ? r[0] : x > r[2] ? r[2] : x;
+    int span = r[2] - r[0], percent = (x - r[0]) * 100 / span;
+    switch (slider) {
+    case 0:
+    case 1:
+        *(slider == 0 ? &c->sensitivity_x : &c->sensitivity_y) =
+            (float)percent * CONTROLS_SENSITIVITY_SPAN / 100.0f + CONTROLS_SENSITIVITY_MIN;
+        break;
+    case 2:
+        c->double_click = percent / 10 + CONTROLS_DOUBLE_CLICK_MIN;
+        break;
+    default: {
+        int v = (x - r[0]) * 256 / span;
+        v = v < CONTROLS_TURN_RATE_MIN ? CONTROLS_TURN_RATE_MIN : v > CONTROLS_TURN_RATE_MAX ? CONTROLS_TURN_RATE_MAX : v;
+        c->turn_rate = (uint8_t)v; /* a byte: 256 is 0 */
+        break;
+    }
+    }
+}
+
+static menu_action controls_click(menus *m, const menu_env *env, int x, int y)
+{
+    controls *c = env->keys;
+    if (!c)
+        return MENU_NOTHING;
+    if (in(controls_reverse, x, y)) {
+        c->reverse = !c->reverse; /* 0x1F527 */
+        return MENU_NOTHING;
+    }
+    for (int s = 0; s < 4; s++)
+        if (in(controls_sliders[s], x, y)) {
+            m->dragging = CONTROLS_SLIDER_FIRST + s;
+            controls_slide(c, s, x);
+            return MENU_NOTHING;
+        }
+    for (int col = 0; col < 3; col++) {
+        /* A key box (0x1F608): its row, but not in the gaps between the boxes. */
+        if (!in(controls_columns[col], x, y) || (y - controls_columns[col][1]) % CONTROLS_ROW > CONTROLS_BOX_H)
+            continue;
+        m->capturing = col * CONTROLS_COLUMN_ROWS + (y - controls_columns[col][1]) / CONTROLS_ROW;
+        if (env->message && env->text)
+            env->message(env->ctx, bs_exe_message(env->text, BS_MSG_HIT_KEY));
+        return MENU_NOTHING;
+    }
+    if (in(controls_default_button, x, y))
+        controls_default(c);
+    else if (in(controls_view, x, y))
+        c->cursor_movement = false; /* 0x1F846 */
+    else if (in(controls_cursor, x, y))
+        c->cursor_movement = true;
+    else if (in(controls_exit, x, y))
+        return controls_exit_screen(m, env);
+    else if (in(controls_help, x, y))
+        menus_help(m, CONTROLS_HELP, 1);
+    return MENU_NOTHING;
+}
+
+/* A key or mouse button for the action waiting for one (0x1FC16). */
+static menu_action controls_capture(menus *m, const menu_env *env, int32_t code)
+{
+    if (controls_reserved(code)) {
+        if (env->message && env->text)
+            env->message(env->ctx, bs_exe_message(env->text, BS_MSG_KEY_RESERVED));
+        return MENU_NOTHING;
+    }
+    env->keys->bind[m->capturing][0] = code;
+    m->capturing = -1;
     return MENU_NOTHING;
 }
 
@@ -339,6 +475,22 @@ static menu_action click(menus *m, const menu_env *env, int x, int y)
             return MENU_NOTHING;
         }
         return options_click(m, env, x, y);
+    case MENU_CONTROLS:
+        return controls_click(m, env, x, y);
+    case MENU_SCREEN_SIZE:
+        if (in(screen_resolution, x, y)) {
+            m->low_resolution = !m->low_resolution; /* 0x2EE4C */
+            return MENU_VIEW;
+        }
+        if (in(screen_slider, x, y)) {
+            m->view_size = (x - screen_slider[0]) / SCREEN_SLIDER_STEP + 1;
+            return MENU_VIEW;
+        }
+        if (in(screen_done, x, y)) {
+            m->open = MENU_OPTIONS;
+            return MENU_SCREEN_DONE;
+        }
+        return MENU_NOTHING;
     default:
         return MENU_NOTHING;
     }
@@ -348,6 +500,11 @@ menu_action menus_event(menus *m, const menu_env *env, const SDL_Event *e, int x
 {
     if (m->open == MENU_NONE)
         return MENU_NOTHING;
+    if (m->open == MENU_CONTROLS && m->capturing >= 0) {
+        /* Waiting for a key or mouse button, nothing else. */
+        int32_t code = env->keys ? controls_code(e) : 0;
+        return code ? controls_capture(m, env, code) : MENU_NOTHING;
+    }
     if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {
         SDL_Keycode k = e->key.key;
         if (m->confirm != MENU_NOTHING) {
@@ -357,6 +514,12 @@ menu_action menus_event(menus *m, const menu_env *env, const SDL_Event *e, int x
                 return confirm_answer(m, false);
             return MENU_NOTHING;
         }
+        if (k == SDLK_ESCAPE && m->open == MENU_SCREEN_SIZE) {
+            m->open = MENU_OPTIONS; /* Done's key */
+            return MENU_SCREEN_DONE;
+        }
+        if (k == SDLK_ESCAPE && m->open == MENU_CONTROLS)
+            return controls_exit_screen(m, env); /* Exit's key */
         /* Esc closes any; F9 the sheet, F11 the automap (0x55DD5, 0x57A68). */
         if (k == SDLK_ESCAPE || (k == SDLK_F9 && m->open == MENU_SHEET && !m->level_up) ||
             (k == SDLK_F11 && m->open == MENU_AUTOMAP))
@@ -373,6 +536,11 @@ menu_action menus_event(menus *m, const menu_env *env, const SDL_Event *e, int x
         return click(m, env, x, y);
     if (e->type == SDL_EVENT_MOUSE_BUTTON_UP && e->button.button == SDL_BUTTON_LEFT)
         m->dragging = -1;
+    if (e->type == SDL_EVENT_MOUSE_MOTION && m->dragging >= CONTROLS_SLIDER_FIRST && m->open == MENU_CONTROLS &&
+        env->keys) {
+        controls_slide(env->keys, m->dragging - CONTROLS_SLIDER_FIRST, x);
+        return MENU_NOTHING;
+    }
     if (e->type == SDL_EVENT_MOUSE_MOTION && m->dragging >= 0 && m->open == MENU_OPTIONS) {
         *(m->dragging == 0 ? &m->sound_volume : &m->music_volume) = volume_at(env, x, m->dragging);
         return MENU_VOLUME;
@@ -521,6 +689,121 @@ static void draw_options(const menus *m, const menu_env *env, bs_overlay *o)
         bs_overlay_image(o, bs_assets_image(env->assets, "sure00.bsi"), 0, 0);
 }
 
+static void draw_screen_size(const menus *m, const menu_env *env, bs_overlay *o)
+{
+    bs_overlay_image(o, bs_assets_image(env->assets, "screen00.bsi"), 0, 0); /* says LOW */
+    if (!m->low_resolution)
+        bs_overlay_image(o, bs_assets_image(env->assets, "screen01.bsi"), 0, 0); /* HIGH */
+    /* The slider: its picture's left size / 7 shown at its right end (0x2EDE6). */
+    const bs_bsi_image *bar = bs_assets_image(env->assets, "screen02.bsi");
+    if (bar && m->view_size > 0) {
+        int w = (int)bar->width * m->view_size / VIEW_FULL;
+        bs_overlay_clip(o, bar->x, bar->y, w, (int)bar->height);
+        bs_overlay_image(o, bar, w - (int)bar->width, 0);
+        bs_overlay_clip(o, 0, 0, 0, 0);
+    }
+}
+
+static void controls_bar(bs_overlay *o, const int r[4], int w)
+{
+    if (w > 0)
+        bs_overlay_fill(o, r[0], r[1], w, CONTROLS_SLIDER_H, CONTROLS_SLIDER_RED);
+}
+
+static void draw_controls(const menus *m, const menu_env *env, bs_overlay *o)
+{
+    bs_overlay_image(o, bs_assets_image(env->assets, "controls.bsi"), 0, 0);
+    const controls *c = env->keys;
+    if (!c)
+        return;
+    /* The sliders: red from the left, none at their least (0x1F8DD). */
+    for (int s = 0; s < 2; s++) {
+        float v = s == 0 ? c->sensitivity_x : c->sensitivity_y;
+        if (v != CONTROLS_SENSITIVITY_MIN)
+            controls_bar(o, controls_sliders[s], (int)((v - CONTROLS_SENSITIVITY_MIN) / 2.99f * 155.0f));
+    }
+    if (c->double_click != CONTROLS_DOUBLE_CLICK_MIN)
+        controls_bar(o, controls_sliders[2], (int)((float)(c->double_click - CONTROLS_DOUBLE_CLICK_MIN) / 10.0f * 169.0f));
+    if (c->turn_rate != CONTROLS_TURN_RATE_MIN)
+        controls_bar(o, controls_sliders[3], (int)((float)(c->turn_rate - CONTROLS_TURN_RATE_MIN) / 246.0f * 169.0f));
+    /* The movement: its button lit, at the buttons' corners. */
+    const bs_bsi_image *mv = bs_assets_image(env->assets, c->cursor_movement ? "cursor.bsi" : "view.bsi");
+    const int *at = c->cursor_movement ? controls_cursor : controls_view;
+    if (mv)
+        bs_overlay_image(o, mv, at[0] - mv->x, at[1] - mv->y);
+    /* The keys, centred in their boxes; red where one is used twice; the one being set framed instead. */
+    for (int a = 0; a < ACT_GAME_COUNT; a++) {
+        const int *col = controls_columns[a / CONTROLS_COLUMN_ROWS];
+        int x = col[0], y = col[1] + (a % CONTROLS_COLUMN_ROWS) * CONTROLS_ROW;
+        if (a == m->capturing) {
+            bs_overlay_frame(o, x, y, CONTROLS_BOX_W, CONTROLS_BOX_H, CONTROLS_CAPTURE_RED);
+            continue;
+        }
+        const bs_font *f = env->fonts[controls_duplicate(c, (action)a) ? 2 : 1];
+        char name[32];
+        controls_name(c->bind[a][0], env->key_names, name, sizeof name);
+        if (f && name[0])
+            text(o, f, x + CONTROLS_BOX_W / 2 - bs_text_width(f, name) / 2, y, name);
+    }
+    if (c->reverse)
+        bs_overlay_image(o, bs_assets_image(env->assets, "mrev00.bsi"), 0, 0);
+    if (m->capturing >= 0 && env->fonts[1] && env->text) {
+        const char *s = bs_exe_message(env->text, BS_MSG_PRESS_KEY);
+        text(o, env->fonts[1], 320 - bs_text_width(env->fonts[1], s) / 2, 5, s);
+    }
+}
+
+void menus_view_rect(const menus *m, int r[4], int *draw_w, int *draw_h)
+{
+    int n = m->view_size < 0 ? 0 : m->view_size > VIEW_FULL ? VIEW_FULL : m->view_size;
+    int w, h;
+    if (n == VIEW_FULL) {
+        w = m->low_resolution ? 320 : 640;
+        h = m->low_resolution ? 240 : 480;
+    } else if (m->low_resolution) {
+        w = 160 + 22 * n;
+        h = 120 + 17 * n;
+    } else {
+        w = 320 + 45 * n;
+        h = 240 + 34 * n;
+    }
+    int k = m->low_resolution ? 2 : 1;
+    r[2] = w * k;
+    r[3] = h * k;
+    r[0] = (640 - r[2]) / 2;
+    r[1] = (480 - r[3]) / 2;
+    *draw_w = w;
+    *draw_h = h;
+}
+
+void menus_draw_view_border(const menus *m, const menu_env *env, bs_overlay *o)
+{
+    if (m->view_size >= VIEW_FULL)
+        return;
+    int r[4], dw, dh;
+    menus_view_rect(m, r, &dw, &dh);
+    const bs_bsi_image *back = bs_assets_image(env->assets, "backscrn.bsi");
+    const int margins[4][4] = {
+        {0, 0, 640, r[1]},                            /* above */
+        {0, r[1] + r[3], 640, 480 - r[1] - r[3]},     /* below */
+        {0, r[1], r[0], r[3]},                        /* left */
+        {r[0] + r[2], r[1], 640 - r[0] - r[2], r[3]}, /* right */
+    };
+    for (int i = 0; back && i < 4; i++) {
+        bs_overlay_clip(o, margins[i][0], margins[i][1], margins[i][2], margins[i][3]);
+        bs_overlay_image(o, back, 0, 0);
+    }
+    bs_overlay_clip(o, 0, 0, 0, 0);
+    /* The frame (0x54D0F with colour 0): its top and left lines on the view's first row and column, its
+     * bottom just below the view, its right on the view's next-to-last column. */
+    int x0 = r[0], y0 = r[1], x1 = 640 - r[0] - 2, y1 = 480 - r[1];
+    const uint32_t black = 0x000000FFu;
+    bs_overlay_fill(o, x0, y0, x1 - x0 + 1, 1, black);
+    bs_overlay_fill(o, x0, y0, 1, y1 - y0 + 1, black);
+    bs_overlay_fill(o, x0, y1, x1 - x0 + 1, 1, black);
+    bs_overlay_fill(o, x1, y0, 1, y1 - y0 + 1, black);
+}
+
 void menus_draw(const menus *m, const menu_env *env, bs_overlay *o)
 {
     switch (m->open) {
@@ -536,6 +819,13 @@ void menus_draw(const menus *m, const menu_env *env, bs_overlay *o)
     case MENU_OPTIONS:
         draw_options(m, env, o);
         break;
+    case MENU_SCREEN_SIZE:
+        draw_options(m, env, o);
+        draw_screen_size(m, env, o);
+        break;
+    case MENU_CONTROLS:
+        draw_controls(m, env, o);
+        break;
     default:
         break;
     }
@@ -547,7 +837,7 @@ int menus_view(const menus *m, int r[4])
         memcpy(r, help_view, sizeof help_view);
         return 2;
     }
-    return m->open == MENU_OPTIONS || m->open == MENU_NONE ? 1 : 0;
+    return m->open == MENU_OPTIONS || m->open == MENU_SCREEN_SIZE || m->open == MENU_NONE ? 1 : 0;
 }
 
 void automap_reveal(uint8_t revealed[AUTOMAP_COLS * AUTOMAP_ROWS], const bs_automap_entry *map, float x, float z)

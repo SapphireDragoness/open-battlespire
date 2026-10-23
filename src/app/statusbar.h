@@ -62,4 +62,8 @@ statusbar_button statusbar_at(const statusbar *s, int x, int y);
 /* Whether a screen point is on the bar (it hides the view there). */
 bool statusbar_covers(const statusbar *s, int x, int y);
 
+/* The last line Cursor movement steers down to: the bar's top, or the screen's bottom in the full view
+ * (0x41AD1). */
+int statusbar_view_bottom(const statusbar *s);
+
 #endif

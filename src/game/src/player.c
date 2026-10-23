@@ -214,7 +214,7 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
     int32_t base = s->speed * 435 / 256;
     if (s->deathmatch)
         base = base * 456 / 256;
-    if (in->run)
+    if (in->athleticism)
         base += base * 282 / 256;
     float fwd_speed = (float)(base + 128), back_speed = (float)(base + 200) / 2, side_speed = (float)(base + 100);
     if (in->walk_speed > 0)
@@ -236,12 +236,12 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
     /* Jumps (0x40860, 0x40DF9): hold to charge, release to jump. Not in water, nor riding. */
     int32_t j = (s->speed + s->strength) / 2 + 120;
     j += j / 2 * s->jump_skill / 100;
-    if (in->run)
+    if (in->athleticism)
         j += j / 2;
     int32_t js = s->speed + 300 + 2 * s->jump_skill;
     if (in->jumping)
         js = js * 330 / 256; /* 0x408C5 */
-    if (in->run)
+    if (in->athleticism)
         js = js * 310 / 256;
     uint32_t charge_max = p->moved ? CHARGE_MOVING : CHARGE_STANDING;
     bool can_jump = p->on_ground && !p->swimming && !riding;
@@ -281,6 +281,20 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
         float sy = sinf(heading), cy = cosf(heading);
         dx = (sy * vf + cy * vs) * dt;
         dz = (cy * vf - sy * vs) * dt;
+        /* Cursor movement (0x41C04) moves before the keys, at its own speeds halved by the same things
+         * (but not the Swimming skill); its side steps go by the player's yaw, on a boat too. */
+        float cf = in->cursor_forward, cs = in->cursor_strafe;
+        if (in->sneak) {
+            cf *= 0.5f;
+            cs *= 0.5f;
+        }
+        if (p->swimming || in->ride == BS_RIDE_BALLOON) {
+            cf *= 0.5f;
+            cs *= 0.5f;
+        }
+        float py = sinf(p->yaw), pc = cosf(p->yaw);
+        dx += (sy * cf + pc * cs) * dt;
+        dz += (cy * cf - py * cs) * dt;
     } else if (p->jumping) {
         dx = sinf(p->jump_yaw) * p->jump_speed * dt;
         dz = cosf(p->jump_yaw) * p->jump_speed * dt;
@@ -440,4 +454,47 @@ void bs_player_move(bs_player *p, const bs_player_stats *s, const bs_collision_w
     p->floor_object = new_floor;
     ev->touch_changed = touch != p->touch_object;
     p->touch_object = touch;
+}
+
+/* Cursor movement's zones (0x41AA7): the rows end 35 % and 75 % of the way down to the bar; the columns at x
+ * 250 and 390, whatever the view's size. */
+#define CURSOR_LEFT 250
+#define CURSOR_RIGHT 390
+#define CURSOR_SPAN 250.0f
+
+int bs_cursor_zone(int x, int y, int bottom, float *amount)
+{
+    if (y > bottom)
+        return BS_CURSOR_OFF;
+    int top = bottom * 35 / 100, low = bottom - bottom * 25 / 100;
+    int zone = y < top ? 0 : y < low ? 3 : 6;
+    if (x > CURSOR_RIGHT) {
+        *amount = (float)(x - CURSOR_RIGHT) / CURSOR_SPAN;
+        zone += 2;
+    } else if (x > CURSOR_LEFT) {
+        zone += 1;
+    } else {
+        *amount = (float)(CURSOR_LEFT - x) / CURSOR_SPAN;
+    }
+    return zone;
+}
+
+/* (0x41C04) */
+bs_cursor_steer bs_cursor_steer_of(int zone, float amount, int32_t speed, int32_t turn_rate)
+{
+    bs_cursor_steer s = {0};
+    float ahead = (float)(speed + 200), aside = (float)(speed + 100);
+    float turn = (float)(turn_rate * 4) * amount * 2.0f * 3.14159265f / 2048.0f;
+    switch (zone) {
+    case 0: s.turn = -turn; s.forward = ahead; break;
+    case 1: s.forward = ahead; break;
+    case 2: s.turn = turn; s.forward = ahead; break;
+    case 3: s.turn = -turn; break;
+    case 5: s.turn = turn; break;
+    case 6: s.strafe = -aside; break;
+    case 7: s.forward = -aside; break;
+    case 8: s.strafe = aside; break;
+    default: break;
+    }
+    return s;
 }

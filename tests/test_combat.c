@@ -131,6 +131,36 @@ static void test_shield(void)
     BS_CHECK(m.shield < 100 && m.shield >= 100 - 12);
 }
 
+/* The player's hits on a Scamp in n blows. */
+static int player_hits(bs_fighter *a, int n, uint32_t seed)
+{
+    bs_fighter d = scamp();
+    bs_rng r = {seed};
+    int hits = 0;
+    for (int k = 0; k < n; k++)
+        hits += bs_melee_roll(a, &d, 4, 4, &r).outcome == BS_MELEE_HIT;
+    return hits;
+}
+
+static void test_adrenaline_rush(void)
+{
+    /* attack 50 + 0 + 10 = 60, defence 20 + 3 + 12 = 35: (60 - 35) / 2 + 50 = 62, less 4 % for the Scamp's
+     * dodge: 60. Adrenaline Rush adds 15 at health 50 x 25 / 256 = 4 or less. */
+    bs_fighter a = player();
+    int n = 20000;
+    a.adrenaline_rush = true;
+    a.health = 5;
+    int calm = player_hits(&a, n, 5);
+    BS_CHECK(calm > n * 58 / 101 && calm < n * 64 / 101);
+    a.health = 4;
+    int rushed = player_hits(&a, n, 5);
+    BS_CHECK(rushed > n * 73 / 101 && rushed < n * 79 / 101);
+    /* Without the advantage, nothing. */
+    a.adrenaline_rush = false;
+    int plain = player_hits(&a, n, 5);
+    BS_CHECK(plain > n * 58 / 101 && plain < n * 64 / 101);
+}
+
 static void test_swings(void)
 {
     bs_swing s;
@@ -184,6 +214,7 @@ int main(void)
     BS_RUN(test_player_damage);
     BS_RUN(test_criticals_and_fumbles);
     BS_RUN(test_shield);
+    BS_RUN(test_adrenaline_rush);
     BS_RUN(test_swings);
     BS_RUN(test_knockback);
     BS_RUN(test_sounds);

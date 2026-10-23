@@ -64,6 +64,7 @@ void bs_level_audio_stop(bs_level_audio *la)
     bs_arena_init(&la->arena, 0);
     memset(la->sound_state, 0, sizeof la->sound_state);
     la->effects_cached = 0;
+    la->placed_count = 0; /* what still plays finishes where it is */
     la->have_nodes = false;
     la->tick_time = 0;
 }
@@ -122,6 +123,47 @@ static const bs_wav *ambient_sound(bs_level_audio *la, int k)
     return la->sound_state[k] == 1 ? &la->sounds[k] : NULL;
 }
 
+static int32_t max_distance(const bs_level_audio *la)
+{
+    return bs_sound_max_distance(BS_SOUND_RANGE_NEAR, la->acute_hearing);
+}
+
+/* Keeps a playing effect to place again on each update. */
+static void track(bs_level_audio *la, bs_voice v, uint32_t source, const float pos[3])
+{
+    if (!v)
+        return;
+    if (la->placed_count == BS_LEVEL_AUDIO_PLACED) {
+        /* Full: the oldest stays where it is. */
+        memmove(la->placed, la->placed + 1, (BS_LEVEL_AUDIO_PLACED - 1) * sizeof *la->placed);
+        la->placed_count--;
+    }
+    uint32_t i = la->placed_count++;
+    la->placed[i].voice = v;
+    la->placed[i].source = source;
+    memcpy(la->placed[i].pos, pos, sizeof la->placed[i].pos);
+}
+
+/* The original's per-frame placing of the sounds playing (0x1C54E). */
+static void follow(bs_level_audio *la, const float listener[3], int32_t yaw)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < la->placed_count; i++) {
+        if (!bs_audio_playing(la->audio, la->placed[i].voice))
+            continue;
+        if (la->placed[i].source && la->locate)
+            la->locate(la->locate_ctx, la->placed[i].source, la->placed[i].pos);
+        bs_sound_place p;
+        if (!bs_sound_follow(listener, yaw, la->placed[i].pos, max_distance(la), false, &p)) {
+            bs_audio_stop(la->audio, la->placed[i].voice);
+            continue;
+        }
+        bs_audio_set(la->audio, la->placed[i].voice, p.gain * la->effects_gain, p.pan);
+        la->placed[n++] = la->placed[i];
+    }
+    la->placed_count = n;
+}
+
 /* One frame of the original's ambient sound routine (0x1CDA5). */
 static void ambient_tick(bs_level_audio *la, const float pos[3], int32_t yaw)
 {
@@ -156,10 +198,14 @@ static void ambient_tick(bs_level_audio *la, const float pos[3], int32_t yaw)
     int k = game_rand(la) % BS_LEVEL_AUDIO_AMBIENT_SOUNDS;
     const bs_wav *w = ambient_sound(la, k);
     bs_sound_place p;
-    if (!w || !bs_sound_place_at(pos, yaw, la->nodes.nodes[pick].pos, BS_SOUND_DISTANCE_NEAR, false, &p))
+    const float *at = la->nodes.nodes[pick].pos;
+    if (!w || bs_sound_distance(pos, at) >= BS_SOUND_CUTOFF_NEAR ||
+        !bs_sound_place_at(pos, yaw, at, max_distance(la), false, &p))
         return;
     bs_pcm_format f = {w->bits, w->channels, w->rate};
-    if (bs_audio_play(la->audio, w->samples, w->sample_bytes, f, p.gain * la->effects_gain, p.pan, false))
+    bs_voice v = bs_audio_play(la->audio, w->samples, w->sample_bytes, f, p.gain * la->effects_gain, p.pan, false);
+    track(la, v, 0, at);
+    if (v)
         printf("ambient: sound %u at node %u, volume %.2f, pan %+.2f\n", ambient_ids[k], pick, (double)p.gain,
                (double)p.pan);
 }
@@ -189,23 +235,32 @@ static const bs_wav *effect(bs_level_audio *la, int32_t id)
     return la->effects_cache[i].ok ? &la->effects_cache[i].wav : NULL;
 }
 
-void bs_level_audio_play_at(bs_level_audio *la, int32_t id, const float pos[3], const float listener[3], float yaw)
+void bs_level_audio_play_at(bs_level_audio *la, int32_t id, uint32_t source, const float pos[3],
+                            const float listener[3], float yaw)
 {
     if (!la->audio)
         return;
     const bs_wav *w = effect(la, id);
-    bs_sound_place p;
-    if (!w || !bs_sound_place_at(listener, game_yaw(yaw), pos, BS_SOUND_DISTANCE_NEAR, false, &p))
+    if (!w)
+        return;
+    bs_sound_place p = {1.0f, 0.0f};
+    if (pos && (bs_sound_distance(listener, pos) >= BS_SOUND_CUTOFF_NEAR ||
+                !bs_sound_place_at(listener, game_yaw(yaw), pos, max_distance(la), false, &p)))
         return;
     bs_pcm_format f = {w->bits, w->channels, w->rate};
-    bs_audio_play(la->audio, w->samples, w->sample_bytes, f, p.gain * la->effects_gain, p.pan, false);
+    bs_voice v = bs_audio_play(la->audio, w->samples, w->sample_bytes, f, p.gain * la->effects_gain, p.pan, false);
+    if (pos)
+        track(la, v, source, pos);
 }
 
 void bs_level_audio_update(bs_level_audio *la, const float pos[3], float yaw, double dt)
 {
-    if (!la->audio || !la->have_nodes)
+    if (!la->audio)
         return;
     int32_t gyaw = game_yaw(yaw);
+    follow(la, pos, gyaw);
+    if (!la->have_nodes)
+        return;
     la->tick_time += dt;
     for (int n = 0; la->tick_time >= 1.0 / FRAME_RATE && n < 4; n++) {
         la->tick_time -= 1.0 / FRAME_RATE;

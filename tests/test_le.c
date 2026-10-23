@@ -111,6 +111,37 @@ static void test_exe_text(void)
     bs_arena_free(&a);
 }
 
+/* The key names: found from "BCKSPC", scan code 0x0E, with the 14 names before it. */
+static void test_key_names(void)
+{
+    static uint8_t strings[32], table[4 * 20];
+    static const char text[] = "x\0ESC\0BCKSPC\0TAB\0";
+    memcpy(strings, text, sizeof text);
+    uint32_t ptrs[17];
+    for (int i = 0; i < 14; i++)
+        ptrs[i] = 0x2000 + 2;          /* "ESC" */
+    ptrs[14] = 0x2000 + 6;             /* "BCKSPC" */
+    ptrs[15] = 0x2000 + 13;            /* "TAB" */
+    ptrs[16] = 0xDEADBEEF;
+    for (int i = 0; i < 17; i++)
+        for (int k = 0; k < 4; k++)
+            table[4 * i + k] = (uint8_t)(ptrs[i] >> (8 * k));
+    bs_le_object objs[2] = {
+        {.base = 0x1000, .mem_size = sizeof table, .data = table},
+        {.base = 0x2000, .mem_size = sizeof strings, .data = strings},
+    };
+    bs_le_image img = {.object_count = 2, .objects = objs};
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    bs_exe_text t;
+    BS_CHECK_EQ_INT(bs_exe_key_names(&img, &a, &t), BS_OK);
+    BS_CHECK_EQ_INT(t.count, 16);
+    BS_CHECK(strcmp(bs_exe_message(&t, 0x0E), "BCKSPC") == 0);
+    BS_CHECK(strcmp(bs_exe_message(&t, 0x0F), "TAB") == 0);
+    BS_CHECK(strcmp(bs_exe_message(&t, 1), "ESC") == 0);
+    bs_arena_free(&a);
+}
+
 int main(void)
 {
     exe_size = synth_le(exe, sizeof exe);
@@ -118,5 +149,6 @@ int main(void)
     BS_RUN(test_load);
     BS_RUN(test_malformed);
     BS_RUN(test_exe_text);
+    BS_RUN(test_key_names);
     return BS_TEST_RESULT();
 }

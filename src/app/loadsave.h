@@ -53,6 +53,7 @@ typedef struct loadsave_env {
     const char *saves_dir;            /* ours */
     const char *original_dir;         /* the install, or NULL */
     uint64_t now_ms;
+    uint32_t double_click_ms;         /* the Controls screen's (controls_double_click_ms) */
     void (*message)(void *ctx, const char *text);
     void *ctx;
 } loadsave_env;
