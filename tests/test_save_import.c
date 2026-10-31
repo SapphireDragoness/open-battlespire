@@ -174,7 +174,7 @@ static void test_import(void)
     static bs_spell table[BS_SPELL_COUNT];
     table[20].skill = 9;
     static bs_saved_game g;
-    BS_CHECK_EQ_INT(bs_save_import(&t, &v, table, &a, &g), BS_OK);
+    BS_CHECK_EQ_INT(bs_save_import(&t, &v, NULL, table, &a, &g), BS_OK);
 
     BS_CHECK_EQ_INT(g.level_number, 1);
     BS_CHECK_EQ_INT(g.clock, 546885);
@@ -280,12 +280,106 @@ static void test_import(void)
     m2 += 4;
     static bs_save_tree t2;
     BS_CHECK_EQ_INT(bs_save_tree_parse(f2, m2, &a, &t2), BS_OK);
-    BS_CHECK_EQ_INT(bs_save_import(&t2, &v, NULL, &a, &g), BS_ERR_FORMAT);
+    BS_CHECK_EQ_INT(bs_save_import(&t2, &v, NULL, NULL, &a, &g), BS_ERR_FORMAT);
+    bs_arena_free(&a);
+}
+
+/* A save made in a level 5 house: the interiors are in the level's world, each under its door, their ids
+ * shifted by their space's base (bs/game/level_spaces.h). */
+static void test_import_interior(void)
+{
+    static bs_level_spaces sp;
+    memset(&sp, 0, sizeof sp);
+    sp.spaces[0] = (bs_level_space){"l5.bs6", 0, 0, 697, 0, 0};
+    sp.spaces[1] = (bs_level_space){"tavrn2.bs6", 310, 956, 51, 0, 0};
+    sp.spaces[2] = (bs_level_space){"inshop.bs6", 489, 3243, 31, 0, 0};
+    sp.count = 3;
+
+    static uint8_t f[65536];
+    size_t n = 0;
+    put32(f, BS_SAVE_VERSION);
+    n += 4;
+    uint8_t *player = record(f, &n, BS_SAVE_PLAYER, BS_SAVE_PLAYER_ID, BS_SAVE_PARENT_ROOT, BS_SAVE_PLAYER_BODY);
+    putf(player + 11, 18802.0f);
+    put32(player + BS_SAVE_HEADER + 0x298, 489); /* in the shop */
+    item(f, &n, 76933, BS_SAVE_PLAYER_ID, 2, 5);  /* carried */
+    uint8_t *outside = record(f, &n, BS_SAVE_AUTOMAP, 81814, BS_SAVE_PLAYER_ID, BS_SAVE_AUTOMAP_CELLS + 5);
+    outside[BS_SAVE_HEADER + 41] = 1;
+    uint8_t *inside = record(f, &n, BS_SAVE_AUTOMAP, 81815, BS_SAVE_PLAYER_ID, BS_SAVE_AUTOMAP_CELLS + 5);
+    put32(inside + 0x21, 489);
+    inside[BS_SAVE_HEADER + 7] = 1;
+    item(f, &n, 3243 + 4, 489, 15, 15);       /* lying in the shop */
+    item(f, &n, 956 + 2, 310, 21, 3);         /* lying in the tavern */
+    item(f, &n, 80850, 956 + 9, 25, 0);       /* in a tavern chest */
+    item(f, &n, 80851, 304, 25, 0);           /* in one of the level's chests */
+    item(f, &n, 305, BS_SAVE_PARENT_LEVEL, 21, 999);
+    record(f, &n, BS_SAVE_MONSTER, 3243 + 20, 489, BS_SAVE_PLAYER_BODY);
+    record(f, &n, BS_SAVE_MONSTER, 600, BS_SAVE_PARENT_LEVEL, BS_SAVE_PLAYER_BODY);
+    record(f, &n, BS_SAVE_MONSTER, 956 + 30, 310, BS_SAVE_PLAYER_BODY);
+    item(f, &n, 81503, 956 + 30, 16, 0);      /* the tavern monster's loot: made again with it */
+    record(f, &n, BS_SAVE_OBJECT, 3243 + 7, 489, 0x6F);
+    record(f, &n, BS_SAVE_OBJECT, 51, BS_SAVE_PARENT_LEVEL, 0x6F);
+    record(f, &n, BS_SAVE_OBJECT, 956 + 8, 310, 0x6F);
+    put32(f + n, 0);
+    n += 4;
+
+    static uint8_t vars[BS_SAVE_VARS_SIZE];
+    memset(vars, 0, sizeof vars);
+    put32(vars + 1051, 5);
+    put32(vars + 14364, 296);                 /* a sigil dispelled outside */
+    put32(vars + 14368, 10000);
+    put32(vars + 14364 + 64 * 12, 1);
+    put32(vars + 15136, 3243 + 21);           /* a speaker leaving the shop */
+    put32(vars + 15140, 560000);
+
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    static bs_save_tree t;
+    static bs_save_vars v;
+    BS_CHECK_EQ_INT(bs_save_tree_parse(f, n, &a, &t), BS_OK);
+    BS_CHECK_EQ_INT(bs_save_vars_parse(vars, sizeof vars, &v), BS_OK);
+    static bs_saved_game g;
+    BS_CHECK_EQ_INT(bs_save_import(&t, &v, &sp, NULL, &a, &g), BS_OK);
+
+    BS_CHECK(strcmp(g.level_file, "inshop.bs6") == 0);
+    BS_CHECK(strcmp(g.campaign_file, "l5.bs6") == 0);
+    BS_CHECK(g.pos[1] == 18802.0f);
+    BS_CHECK(g.have_map);
+    BS_CHECK_EQ_INT(g.seen[7], 1);            /* the shop's grid */
+    BS_CHECK_EQ_INT(g.seen[41], 0);
+
+    BS_CHECK_EQ_INT(g.item_count, 7);
+    const bs_saved_item *it = g.items;
+    BS_CHECK(it[0].place == BS_SAVED_CARRIED && it[0].level == -1);
+    BS_CHECK(it[1].place == BS_SAVED_FLOOR && it[1].level == -1 && it[1].id == 4);
+    BS_CHECK_EQ_INT(g.other_level_count, 2);
+    BS_CHECK(strcmp(g.other_levels[0], "tavrn2.bs6") == 0 && strcmp(g.other_levels[1], "l5.bs6") == 0);
+    BS_CHECK(it[2].place == BS_SAVED_FLOOR && it[2].level == 0 && it[2].id == 2);
+    BS_CHECK(it[3].place == BS_SAVED_IN_OBJECT && it[3].level == 0 && it[3].ref == 9);
+    BS_CHECK(it[4].place == BS_SAVED_IN_OBJECT && it[4].level == 1 && it[4].ref == 304);
+    BS_CHECK(it[5].place == BS_SAVED_FLOOR && it[5].level == 1 && it[5].id == 305);
+    BS_CHECK_EQ_INT(it[6].place, BS_SAVED_NOWHERE);
+
+    /* The shop's monsters and models only, by the shop file's ids. */
+    BS_CHECK_EQ_INT(g.monster_count, 1);
+    BS_CHECK_EQ_INT(g.monsters[0].id, 20);
+    BS_CHECK_EQ_INT(g.object_count, 1);
+    BS_CHECK_EQ_INT(g.objects[0].id, 7);
+    BS_CHECK_EQ_INT(g.sigil_gone_count, 0);
+    BS_CHECK_EQ_INT(g.leaving[0].id, 21);
+    BS_CHECK_EQ_INT(g.leaving[0].at, 560000);
+
+    /* Without the spaces, all of it is the level's. */
+    BS_CHECK_EQ_INT(bs_save_import(&t, &v, NULL, NULL, &a, &g), BS_OK);
+    BS_CHECK(!g.level_file[0]);
+    BS_CHECK_EQ_INT(g.other_level_count, 0);
+    BS_CHECK_EQ_INT(g.seen[41], 1);
     bs_arena_free(&a);
 }
 
 int main(void)
 {
     BS_RUN(test_import);
+    BS_RUN(test_import_interior);
     return BS_TEST_RESULT();
 }

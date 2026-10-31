@@ -21,6 +21,7 @@
 #include "bs/formats/talk.h"
 #include "bs/game/items.h"
 #include "bs/game/level_logic.h"
+#include "bs/game/level_spaces.h"
 #include "bs/game/player.h"
 #include "bs/game/game_save.h"
 #include "bs/game/save_edit.h"
@@ -553,6 +554,62 @@ static void test_player_level1(void)
 }
 
 /*
+ * Level 1 starts with one generator running: its door panel with BS6
+ * property 120 has its three linked moves at their ends (as in the original's
+ * saves), and no other door panel's. Dagon's transport beam and Dagon are in
+ * indagon.bs6.
+ */
+static void test_level1_generator(void)
+{
+    bs_assets *assets;
+    BS_CHECK_EQ_INT(bs_assets_open(&vfs, &assets), BS_OK);
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    uint8_t *data;
+    size_t n;
+    bs_bs6_level lvl;
+    bs_level_logic lg;
+    BS_CHECK_EQ_INT(bs_assets_read(assets, "l1.bs6", &a, &data, &n), BS_OK);
+    BS_CHECK_EQ_INT(bs_bs6_parse(data, n, &a, &lvl), BS_OK);
+    BS_CHECK_EQ_INT(bs_level_logic_build(&lvl, &a, &lg), BS_OK);
+    uint32_t panels = 0, open = 0;
+    for (uint32_t i = 0; i < lg.object_count; i++) {
+        const bs_logic_object *o = &lg.objects[i];
+        if (o->kind != BS_LOGIC_OBJECT || bs_strncasecmp(lvl.model_names[lvl.objects[o->index].model], "1doorpan", 8))
+            continue;
+        panels++;
+        uint32_t ends = 0;
+        for (uint32_t l = o->first_link; l < o->first_link + o->link_count; l++) {
+            const bs_logic_object *t = &lg.objects[lg.links[l]];
+            for (uint32_t c = t->first_ctrl; c < t->first_ctrl + t->ctrl_count; c++)
+                ends += lg.ctrls[c].reversed;
+        }
+        if (ends) {
+            open++;
+            BS_CHECK_EQ_INT(lvl.objects[o->index].id, 220);
+            BS_CHECK_EQ_INT(ends, 3);
+        }
+    }
+    BS_CHECK_EQ_INT(panels, 6);
+    BS_CHECK_EQ_INT(open, 1);
+
+    BS_CHECK_EQ_INT(bs_assets_read(assets, "indagon.bs6", &a, &data, &n), BS_OK);
+    BS_CHECK_EQ_INT(bs_bs6_parse(data, n, &a, &lvl), BS_OK);
+    bool beam = false, dagon = false;
+    for (uint32_t i = 0; i < lvl.object_count; i++)
+        beam |= bs_strcasecmp(lvl.model_names[lvl.objects[i].model], "l8tbeam") == 0;
+    for (uint32_t i = 0; i < lvl.flat_count; i++) {
+        bs_bs6_logic g;
+        BS_CHECK_EQ_INT(bs_bs6_entity_logic(&lvl.flats[i].chunk, &a, &g), BS_OK);
+        const bs_bs6_record *code = bs_bs6_logic_prop(&g, 108);
+        dagon |= code && code->size >= 3 && memcmp(code->data, "ZZ1", 3) == 0;
+    }
+    BS_CHECK(beam && dagon);
+    bs_arena_free(&a);
+    bs_assets_close(assets);
+}
+
+/*
  * Every NODES file named in LEVELS.TXT parses, links included. Three
  * deathmatch levels have none; nodes.m1 serves both versions of Cf1.
  */
@@ -984,8 +1041,35 @@ static void test_classes(void)
     bs_arena_free(&a);
 }
 
+/* A level file from the install, for bs_level_spaces_build. */
+static bs_result read_level(void *ctx, const char *file, bs_arena *a, bs_bs6_level *out)
+{
+    uint8_t *data;
+    size_t n;
+    bs_result r = bs_assets_read(ctx, file, a, &data, &n);
+    return r == BS_OK ? bs_bs6_parse(data, n, a, out) : r;
+}
+
+/* The parsed level of a space by its file, or NULL. */
+static const bs_bs6_level *space_level(const bs_level_spaces *sp, const bs_bs6_level *levels, const char *file)
+{
+    for (uint32_t k = 0; k < sp->count; k++)
+        if (bs_strcasecmp(sp->spaces[k].file, file) == 0)
+            return &levels[k];
+    return NULL;
+}
+
+static bool has_object(const bs_bs6_level *lv, uint32_t id)
+{
+    for (uint32_t k = 0; lv && k < lv->object_count; k++)
+        if (lv->objects[k].id == id)
+            return true;
+    return false;
+}
+
 /* Saved games in the install's SAVE0-9, if any (the user's own): every file reads; the player is there;
- * parents resolve; the level's controllers take up the rest of the tree exactly, in our chain order. */
+ * parents resolve to the level or one of its interiors; the controllers of the level and its interiors take
+ * up the rest of the tree exactly, in our chain order; imported, every item is somewhere its level has. */
 static void test_saves(void)
 {
     bs_arena a;
@@ -1023,7 +1107,7 @@ static void test_saves(void)
         int32_t player = bs_save_find(&t, BS_SAVE_PLAYER_ID);
         BS_CHECK(player >= 0 && t.records[player].type == BS_SAVE_PLAYER &&
                  t.records[player].parent == BS_SAVE_PARENT_ROOT);
-        /* The campaign level's controller chains, in the logic's order. */
+        /* The campaign level and its interiors, with their controller chains in the logic's order. */
         const bs_level_info *info = NULL;
         for (size_t i = 0; i < table.count && !info; i++)
             if (bs_level_game_type(&table.levels[i]) == BS_GAME_CAMPAIGN &&
@@ -1032,28 +1116,38 @@ static void test_saves(void)
         BS_CHECK(info != NULL);
         if (!info)
             continue;
-        bs_bs6_level lvl;
-        bs_level_logic lg;
-        BS_CHECK_EQ_INT(bs_assets_read(assets, info->file, &a, &data, &n), BS_OK);
-        BS_CHECK_EQ_INT(bs_bs6_parse(data, n, &a, &lvl), BS_OK);
-        BS_CHECK_EQ_INT(bs_level_logic_build(&lvl, &a, &lg), BS_OK);
-        uint32_t *chains = BS_ARENA_ARRAY(&a, uint32_t, lg.object_count + 1), *ids =
-            BS_ARENA_ARRAY(&a, uint32_t, lg.object_count + 1), nch = 0;
-        for (uint32_t i = 0; chains && ids && i < lg.object_count; i++)
-            if (lg.objects[i].ctrl_count) {
-                ids[nch] = lg.objects[i].entity_id;
-                chains[nch++] = lg.objects[i].ctrl_count;
-            }
-        /* Parents not saved are the level's own objects (chests), by their BS6 ids. */
+        static bs_level_spaces sp;
+        static bs_bs6_level levels[BS_LEVEL_SPACES_MAX];
+        BS_CHECK_EQ_INT(read_level(assets, info->file, &a, &levels[0]), BS_OK);
+        BS_CHECK_EQ_INT(bs_level_spaces_build(info->file, &levels[0], read_level, assets, &a, &sp), BS_OK);
+        uint32_t *ids = BS_ARENA_ARRAY(&a, uint32_t, sp.chain_count + 1);
+        uint32_t nch = 0;
+        for (uint32_t s = 0; s < sp.count && ids; s++) {
+            bs_level_logic lg;
+            if (s)
+                BS_CHECK_EQ_INT(read_level(assets, sp.spaces[s].file, &a, &levels[s]), BS_OK);
+            BS_CHECK_EQ_INT(bs_level_logic_build(&levels[s], &a, &lg), BS_OK);
+            for (uint32_t i = 0; i < lg.object_count; i++)
+                if (lg.objects[i].ctrl_count && nch < sp.chain_count)
+                    ids[nch++] = sp.spaces[s].base + lg.objects[i].entity_id;
+        }
+        BS_CHECK_EQ_INT(nch, sp.chain_count);
+        /* Parents not saved are a space's door or the level's or an interior's own objects (chests). */
         for (uint32_t i = 0; i < t.count; i++) {
             const bs_save_record *r = &t.records[i];
             if (r->parent <= BS_SAVE_PARENT_LEVEL || r->parent_index >= 0 || r->reserve)
                 continue;
-            bool level_object = false;
-            for (uint32_t k = 0; k < lg.object_count && !level_object; k++)
-                level_object = lg.objects[k].entity_id == r->parent;
-            BS_CHECK(level_object);
+            uint32_t local;
+            int s = bs_level_spaces_by_door(&sp, r->parent);
+            if (s <= 0) {
+                s = bs_level_spaces_of_id(&sp, r->parent, &local);
+                BS_CHECK(s >= 0 && has_object(&levels[s], local));
+            }
         }
+        /* A saved placed model's chain number (+0x27) is its place in the table. */
+        for (uint32_t i = 0; ids && i < t.count; i++)
+            if (t.records[i].type == BS_SAVE_OBJECT && t.records[i].link2 >= 0)
+                BS_CHECK((uint32_t)t.records[i].link2 < nch && ids[t.records[i].link2] == t.records[i].id);
         /* Opened for editing and written untouched, both files come back as they were. */
         static bs_save_edit ed;
         BS_CHECK_EQ_INT(bs_save_edit_open(&ed, tree_data, tree_size, vars_data, vars_size), BS_OK);
@@ -1064,29 +1158,30 @@ static void test_saves(void)
         BS_CHECK(memcmp(ed.vars, vars_data, BS_SAVE_VARS_SIZE) == 0);
         free(again);
         bs_save_edit_free(&ed);
-        /* Imported: every item somewhere the level has, every saved model one of the level's, the player on
-         * a cell of the automap that was seen (the grid row by row, as the engine keeps it). */
+        /* Imported: every item somewhere its level has, every saved model one of the level's, the player on
+         * a cell of the automap that was seen (the grid row by row, as the engine keeps it). The name may be
+         * blank, and the player may carry nothing. */
         static bs_saved_game sg;
-        BS_CHECK_EQ_INT(bs_save_import(&t, &v, spells, &a, &sg), BS_OK);
-        BS_CHECK(sg.name[0] != '\0' && sg.character.health_max > 0 && sg.character.spells_known != 0);
-        uint32_t carried = 0;
+        BS_CHECK_EQ_INT(bs_save_import(&t, &v, &sp, spells, &a, &sg), BS_OK);
+        BS_CHECK(sg.character.health_max > 0 && sg.character.spells_known != 0);
+        const char *file = sg.level_file[0] ? sg.level_file : info->file;
+        const bs_bs6_level *lvl = space_level(&sp, levels, file);
+        BS_CHECK(lvl != NULL);
+        if (!lvl)
+            continue;
+        BS_CHECK(!sg.level_file[0] || bs_strcasecmp(sg.campaign_file, info->file) == 0);
         for (uint32_t i = 0; i < sg.item_count; i++) {
             const bs_saved_item *it = &sg.items[i];
-            carried += it->place == BS_SAVED_CARRIED;
-            bool known = it->place != BS_SAVED_IN_OBJECT;
-            for (uint32_t k = 0; k < lvl.object_count && !known; k++)
-                known = lvl.objects[k].id == it->ref;
-            BS_CHECK(known);
-            BS_CHECK(it->place != BS_SAVED_IN_ITEM || it->ref < sg.item_count);
-            BS_CHECK(it->place != BS_SAVED_MONSTER || it->ref < sg.monster_count);
+            BS_CHECK(it->place != BS_SAVED_CARRIED || it->level == -1);
+            BS_CHECK(it->level >= -1 && it->level < (int32_t)sg.other_level_count);
+            const bs_bs6_level *in = it->level < 0 ? lvl : space_level(&sp, levels, sg.other_levels[it->level]);
+            BS_CHECK(in != NULL);
+            BS_CHECK(it->place != BS_SAVED_IN_OBJECT || has_object(in, it->ref));
+            BS_CHECK(it->place != BS_SAVED_IN_ITEM || (it->ref < sg.item_count && sg.items[it->ref].level == it->level));
+            BS_CHECK(it->place != BS_SAVED_MONSTER || (it->ref < sg.monster_count && it->level == -1));
         }
-        BS_CHECK(carried > 0);
-        for (uint32_t i = 0; i < sg.object_count; i++) {
-            bool known = false;
-            for (uint32_t k = 0; k < lvl.object_count && !known; k++)
-                known = lvl.objects[k].id == sg.objects[i].id;
-            BS_CHECK(known);
-        }
+        for (uint32_t i = 0; i < sg.object_count; i++)
+            BS_CHECK(has_object(lvl, sg.objects[i].id));
         for (uint32_t i = 0; i < sg.monster_count; i++)
             BS_CHECK(sg.monsters[i].type < BS_CREATURE_COUNT && sg.monsters[i].health > 0);
         /* As our text and back: the same game. */
@@ -1098,10 +1193,12 @@ static void test_saves(void)
             BS_CHECK_EQ_INT(bs_game_save_write(&sg, NULL, &text, &text_size), BS_OK);
             BS_CHECK_EQ_INT(bs_game_save_read(text, text_size, spells, NULL, &a, &back, err), BS_OK);
             BS_CHECK(back.item_count == sg.item_count && back.monster_count == sg.monster_count &&
-                     back.object_count == sg.object_count);
+                     back.object_count == sg.object_count && back.other_level_count == sg.other_level_count);
+            BS_CHECK(strcmp(back.level_file, sg.level_file) == 0 && strcmp(back.campaign_file, sg.campaign_file) == 0);
             for (uint32_t i = 0; i < sg.item_count && i < back.item_count; i++)
                 BS_CHECK(memcmp(&back.items[i].item, &sg.items[i].item, sizeof(bs_item)) == 0 &&
-                         back.items[i].place == sg.items[i].place && back.items[i].ref == sg.items[i].ref);
+                         back.items[i].place == sg.items[i].place && back.items[i].ref == sg.items[i].ref &&
+                         back.items[i].level == sg.items[i].level);
             for (uint32_t i = 0; i < sg.monster_count && i < back.monster_count; i++) {
                 /* Positions are kept to a thousandth. */
                 bs_saved_monster m = back.monsters[i];
@@ -1128,7 +1225,7 @@ static void test_saves(void)
             }
             free(text);
         }
-        int map = bs_automap_find(&maps, info->file, sg.pos[1]);
+        int map = bs_automap_find(&maps, file, sg.pos[1]);
         uint32_t seen = 0;
         for (uint32_t k = 0; k < BS_SAVE_AUTOMAP_CELLS; k++)
             seen += sg.seen[k];
@@ -1137,25 +1234,18 @@ static void test_saves(void)
             bs_automap_point(&maps.maps[map], sg.pos[0], sg.pos[2], &sx, &sy);
             BS_CHECK(sg.seen[(sy / 16) * 40 + sx / 16]);
         }
-        bool ours = true; /* saved in this level, not one of its interiors */
-        for (uint32_t i = 0; i < t.count; i++)
-            if (t.records[i].type == BS_SAVE_OBJECT && t.records[i].link2 >= 0)
-                ours = ours && (uint32_t)t.records[i].link2 < nch && ids[t.records[i].link2] == t.records[i].id;
-        if (!ours) {
-            fprintf(stderr, "  SAVE%d: not in %s itself; controllers not checked\n", slot, info->file);
-            continue;
-        }
         bs_save_controller *ctl;
         uint32_t nc, na;
         uint8_t *active;
-        BS_CHECK_EQ_INT(bs_save_controllers_read(t.controls, t.controls_size, chains, nch, &a, &ctl, &nc, &active, &na),
+        BS_CHECK_EQ_INT(bs_save_controllers_read(t.controls, t.controls_size, sp.chain_lengths, sp.chain_count, &a,
+                                                 &ctl, &nc, &active, &na),
                         BS_OK);
         size_t used = 4 + na;
         for (uint32_t i = 0; i < nc; i++)
             used += (ctl[i].flags & 1) ? 45 : 1;
         BS_CHECK_EQ_INT(used, t.controls_size);
         for (uint32_t i = 0; i < na; i++)
-            BS_CHECK(active[i] < nch);
+            BS_CHECK(active[i] < sp.chain_count);
     }
     if (found)
         fprintf(stderr, "  %d saved games checked\n", found);
@@ -1342,6 +1432,7 @@ int main(void)
     BS_RUN(test_all_levels);
     BS_RUN(test_separate_objects);
     BS_RUN(test_player_level1);
+    BS_RUN(test_level1_generator);
     BS_RUN(test_all_nodes);
     BS_RUN(test_items);
     BS_RUN(test_creatures);

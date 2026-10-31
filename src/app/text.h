@@ -17,7 +17,7 @@ void ui_cp437(const char *in, char *out, size_t cap);
 void ui_rsc_text(const bs_rsc *rsc, int32_t id, char *out, size_t cap);
 
 /* Text wrapped at a width, each line centred on cx (0x597DB): a line breaks at the last space before the
- * text gets too wide, or at a '$'. Returns the y of the last line drawn (y if none). */
+ * text gets too wide, or at a '$'. Returns the y of the last line drawn (y if none). o may be NULL to measure. */
 int ui_text_box(bs_overlay *o, const bs_font *f, const char *s, int cx, int y, int width);
 
 #endif

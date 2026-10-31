@@ -758,6 +758,21 @@ size_t synth_bs6_logic(uint8_t *out, size_t cap)
     le_ctrl(&b, 16, NULL, 0, NULL);
     le_ctrl(&b, 261, once, 4, "");
     le_chunk_end(&b, o);
+    /* A panel that starts used (STRU 120): its generator is up from the start. */
+    static const int32_t gen[] = { 0, -100, 0, 1000 };
+    o = le_object_begin(&b, 18, 800);
+    le_ctrl(&b, 16, NULL, 0, NULL);
+    st = le_chunk_begin(&b, "STRU");
+    le_i32(&b, "IDNB", 120);
+    put(&b, "RAWD", 4);
+    u32(&b, 4);
+    u32(&b, 1);
+    le_chunk_end(&b, st);
+    le_link(&b, 0, 19);
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 19, 900);
+    le_ctrl(&b, 261, gen, 4, "r");
+    le_chunk_end(&b, o);
     le_chunk_end(&b, objs);
 
     size_t flas = le_chunk_begin(&b, "FLAS");
@@ -780,6 +795,39 @@ size_t synth_bs6_logic(uint8_t *out, size_t cap)
     le_i32(&b, "SELE", 0);
     le_chunk_end(&b, flat);
     le_chunk_end(&b, flas);
+    le_chunk_end(&b, gnrl);
+    return done(&b);
+}
+
+size_t synth_bs6_doors(uint8_t *out, size_t cap, const synth_door *doors, int n, int32_t last, int ctrls)
+{
+    w b = { out, 0, cap, 1 };
+    size_t gnrl = le_chunk_begin(&b, "GNRL");
+    size_t objs = le_chunk_begin(&b, "OBJS");
+    put(&b, "LFIL", 4);
+    u32(&b, 260);
+    put(&b, "box", 3);
+    fill(&b, 0, 257);
+    for (int i = 0; i < n; i++) {
+        size_t o = le_object_begin(&b, doors[i].id, 100 * i);
+        size_t st = le_chunk_begin(&b, "STRU");
+        le_i32(&b, "IDNB", 100);
+        put(&b, "RAWD", 4);
+        u32(&b, 30);
+        char name[14] = { 0 };
+        memcpy(name, doors[i].to, strlen(doors[i].to));
+        put(&b, name, 14);
+        u32(&b, 1);
+        fill(&b, 0, 12);
+        le_chunk_end(&b, st);
+        le_chunk_end(&b, o);
+    }
+    static const int32_t move[] = { 0, -100, 0, 1000 };
+    size_t o = le_object_begin(&b, last, 1000);
+    for (int k = 0; k < ctrls; k++)
+        le_ctrl(&b, 261, move, 4, "");
+    le_chunk_end(&b, o);
+    le_chunk_end(&b, objs);
     le_chunk_end(&b, gnrl);
     return done(&b);
 }

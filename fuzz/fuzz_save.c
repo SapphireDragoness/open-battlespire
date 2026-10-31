@@ -47,7 +47,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         /* With empty variables: the records alone decide the rest. */
         static bs_save_vars none;
         static bs_saved_game g;
-        if (bs_save_import(&t, &none, NULL, &a, &g) == BS_OK) {
+        if (bs_save_import(&t, &none, NULL, NULL, &a, &g) == BS_OK) {
             for (uint32_t i = 0; i < g.item_count; i++)
                 if (g.items[i].place == BS_SAVED_IN_ITEM)
                     sink += g.items[g.items[i].ref].id;

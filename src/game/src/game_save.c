@@ -200,6 +200,8 @@ bs_result bs_game_save_write(const bs_saved_game *g, const bs_game_save_names *n
         bs_ini_put_str(&w, "other_level", g->other_levels[k]);
     bs_ini_put(&w, "level_number", NULL, "%d", g->level_number);
     bs_ini_put(&w, "clock", "ms", "%u", (unsigned)g->clock);
+    if (g->beamed)
+        bs_ini_put(&w, "beamed", NULL, "%s", yes(g->beamed));
     if (g->captive_at)
         bs_ini_put(&w, "captive_at", NULL, "%u", (unsigned)g->captive_at);
     write_player(&w, g);
@@ -496,6 +498,8 @@ static void read_save(reader *r, const bs_ini_section *s, bs_saved_game *g)
             g->level_number = (int)num(r, e->value, 1, 99);
         else if (!strcmp(e->key, "clock"))
             g->clock = u32v(r, e->value);
+        else if (!strcmp(e->key, "beamed"))
+            g->beamed = boolv(r, e->value);
         else if (!strcmp(e->key, "captive_at"))
             g->captive_at = u32v(r, e->value);
         else
@@ -1121,8 +1125,11 @@ bs_result bs_game_save_read(const char *text, size_t size, const bs_spell *spell
         if (it->place == BS_SAVED_IN_OBJECT) {
             it->ref = want;
         } else if (it->place == BS_SAVED_IN_ITEM) {
+            /* Ids are a level's own, so another level may have the same: the item's level's first. */
             uint32_t k = 0;
-            while (k < g->item_count && (g->items[k].id != want || k == i))
+            while (k < g->item_count && (g->items[k].id != want || k == i || g->items[k].level != it->level))
+                k++;
+            for (k = k < g->item_count ? k : 0; k < g->item_count && (g->items[k].id != want || k == i);)
                 k++;
             if (k == g->item_count)
                 bad(&r, "item %u is in item %u, which isn't there", (unsigned)it->id, (unsigned)want);

@@ -13,7 +13,7 @@ static bs_bs6_level level;
 static bs_level_logic lg;
 static bs_logic_output out;
 
-/* The logic object of entity id; objects are in file order, so ids 10..17 are 0..7. */
+/* The logic object of entity id; objects are in file order, so ids 10..19 are 0..9. */
 static uint32_t obj(uint32_t id)
 {
     for (uint32_t i = 0; i < lg.object_count; i++)
@@ -35,8 +35,8 @@ static void setup(void)
 static void test_build(void)
 {
     setup();
-    BS_CHECK_EQ_INT(lg.object_count, 10); /* 8 objects, 2 flats */
-    BS_CHECK_EQ_INT(lg.link_count, 4);
+    BS_CHECK_EQ_INT(lg.object_count, 12); /* 10 objects, 2 flats */
+    BS_CHECK_EQ_INT(lg.link_count, 5);
     const bs_logic_object *button = &lg.objects[obj(10)];
     BS_CHECK(button->ctrl_count == 1 && button->link_count == 1);
     BS_CHECK_EQ_INT(lg.ctrls[button->first_ctrl].sound, 72);
@@ -178,6 +178,23 @@ static void test_timers(void)
     BS_CHECK(fabsf(lg.objects[a].pos[0] - 520) < 0.5f); /* no "r": the second run goes on from 510 */
 }
 
+/* STRU 120: the panel starts used, its generator up; using the panel brings the generator down. */
+static void test_start_used(void)
+{
+    setup();
+    uint32_t p = obj(18), gen = obj(19);
+    const bs_logic_ctrl *c = &lg.ctrls[lg.objects[gen].first_ctrl];
+    BS_CHECK(fabsf(lg.objects[gen].pos[1] - -100) < 0.5f && lg.objects[gen].moved);
+    BS_CHECK(c->reversed && !c->running && !lg.objects[gen].active);
+    BS_CHECK(!lg.objects[p].moved); /* the panel has no move of its own */
+    BS_CHECK(!lg.objects[obj(11)].moved && !lg.ctrls[lg.objects[obj(11)].first_ctrl].reversed);
+    bs_level_logic_activate(&lg, p, BS_LOGIC_EVENT_USE, 0, &out);
+    bs_level_logic_update(&lg, 500, &out);
+    BS_CHECK(fabsf(lg.objects[gen].pos[1] - -50) < 0.5f);
+    bs_level_logic_update(&lg, 1000, &out);
+    BS_CHECK(fabsf(lg.objects[gen].pos[1]) < 0.5f && !c->reversed);
+}
+
 int main(void)
 {
     bs_arena_init(&arena, 0);
@@ -188,6 +205,7 @@ int main(void)
     BS_RUN(test_one_shot);
     BS_RUN(test_teleport);
     BS_RUN(test_timers);
+    BS_RUN(test_start_used);
     bs_arena_free(&arena);
     return BS_TEST_RESULT();
 }

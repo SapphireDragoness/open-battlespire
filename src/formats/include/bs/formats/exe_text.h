@@ -17,6 +17,7 @@
 enum {
     BS_MSG_TOO_FAR = 1,             /* "You are too far away." */
     BS_MSG_OFF_BALANCE = 3,         /* "Your opponent's dodge caught you off balance." */
+    BS_MSG_NO_ARMOUR = 5,           /* "You are not wearing the armor of protection!" */
     BS_MSG_GREETING = 6,            /* 6-11: "The %s invites you to speak." ... */
     BS_MSG_SKILL_INCREASED = 88,    /* "%s skill has increased..." */
     BS_MSG_NO_ARROWS = 106,         /* "You have no arrows ready." */

@@ -15,7 +15,9 @@
  * fight in melee (fight.c, docs/formats/creatures.md). Spells are cast from
  * the spell book (F12, spellbook.c) or its hot keys F1-F8, by monsters and
  * from potions (docs/formats/spells.md). Load Saved Game (or --load) carries on
- * from one of the original game's saves (docs/formats/save.md, load_game).
+ * from one of the original game's saves (docs/formats/save.md, load_game). The
+ * game ends with the win at Dagon or a game over video (docs/re/README.md,
+ * "Videos"; end_game).
  */
 
 #include <math.h>
@@ -50,6 +52,7 @@
 #include "bs/game/items.h"
 #include "bs/game/level_logic.h"
 #include "bs/game/level_script.h"
+#include "bs/game/level_spaces.h"
 #include "bs/game/levelling.h"
 #include "bs/game/player.h"
 #include "bs/game/use.h"
@@ -67,6 +70,7 @@
 #include "talk.h"
 #include "menus.h"
 #include "statusbar.h"
+#include "text.h"
 
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel at the Controls screen's sensitivity 1 */
 #define FLY_SPEED 400.0f     /* level units per second, flying */
@@ -103,6 +107,14 @@
 #define MESSAGE_MS 10000
 #define MESSAGE_TOP 5
 #define MESSAGE_WRAP 600     /* TEXT.RSC messages are wrapped to this width (0x4DBF2) */
+#define VIDEO_TEXT_BOTTOM 470  /* a game over's text ends here, over its video (0x1ED57) */
+#define VIDEO_SKIP_FRAMES 10   /* a video can be skipped after this many frames (0x1ECD1, 0x1EE8C) */
+#define TEXT_CAPTIVITY 1058    /* TEXT.RSC: "...you grow old and die in captivity..." (0x13632) */
+#define CAPTIVE_BEAM_MS 2000   /* Dagon's beam without the armour: captured after this (0x4AC88) */
+#define CAPTIVE_TALK_MS 3000   /* after Dagon's conversation (0x58205) */
+#define WIN_CODE "ZZ1"         /* the NPC flat the winning blow strikes: Dagon (0x499B8) */
+#define WIN_WEAPON_BASE 3      /* ... with the Moon Reiver, a broadsword enchanted 8011 (0x499EF) */
+#define WIN_WEAPON_MAGIC 8011
 #define PROP_MESSAGE 114     /* BS6: a TEXT.RSC message shown on use (0x24C26) */
 #define PROP_DOOR 100        /* BS6: a door to another level file or interior (0x24817) */
 #define PROP_ARRIVAL 101     /* BS6: an arrival point's number on a flat (0x248E6) */
@@ -220,6 +232,8 @@ typedef struct game {
     uint32_t *gem_until;         /* per level object: hidden until (logic clock ms) */
     /* Level transitions. */
     char after_video[32];        /* the level a video leads to ("" for the title) */
+    char video_text[1024];       /* a game over's TEXT.RSC text over the video, "" none */
+    bool video_hold, video_held; /* its last frame stays until a key; and is staying */
     int32_t level_up_points;     /* the level done: the level-up screen comes up with these in the next */
     float moved_from[3];         /* where the player last moved 128 units from (0x3F7BD0) */
     bool moved;                  /* since the last 5 s tick (0x3F7C28) */
@@ -247,11 +261,16 @@ typedef struct game {
     struct {
         char file[32];
         bs_items items;
-    } level_cache[16];           /* levels left through a door, with their items */
+    } level_cache[BS_SAVED_LEVELS]; /* levels left through a door, with their items */
     uint32_t level_cache_count;
-    enum { GO_NONE, GO_NEXT_LEVEL, GO_DOOR } go;   /* a transition to make between frames */
+    enum { GO_NONE, GO_NEXT_LEVEL, GO_DOOR, GO_ENDING } go;   /* a transition to make between frames */
     char go_file[32];
     int32_t go_arrival;
+    struct {
+        char video[32];
+        int32_t text;            /* TEXT.RSC over it, or -1 */
+        bool hold;               /* the last frame stays until a key */
+    } ending;                    /* GO_ENDING: the game ends with this video */
     bs_spell spells[BS_SPELL_COUNT];
     bool have_spells;
     const char *name;
@@ -307,7 +326,9 @@ typedef struct game {
         uint32_t at;             /* logic clock */
     } leaving[LEAVING_MAX];
     uint32_t leaving_count;
-    uint32_t captive_at;         /* the "ZZ" conversation's captivity, 3 s after (0x5817E); 0 none */
+    uint32_t captive_at;         /* captured at this clock (player +0x2DA): Dagon's beam without the armour,
+                                    or 3 s after his conversation (0x5817E); 0 none */
+    bool beamed;                 /* came by Dagon's transport beam (player +0x241, 0x4AC68) */
     /* Saved games (loadsave.c). */
     loadsave loadsave;
     char saves_dir[BS_PATH_MAX];  /* ours; "" until needed */
@@ -474,6 +495,9 @@ static void leave_state(game *g)
         bs_video_close(g->video);
         g->video = NULL;
         bs_arena_free(&g->video_arena);
+        g->video_text[0] = '\0';
+        g->video_hold = g->video_held = false;
+        g->overlay_dirty = true;
         break;
     case STATE_TITLE:
         if (g->audio)
@@ -533,12 +557,24 @@ static void after_video(game *g)
     }
 }
 
-/* Plays a CD video, then goes on to `next` (a level file, or "" for the title). */
-static void play_video(game *g, const char *path, const char *next)
+/* Plays a CD video, then goes on to `next` (a level file, or "" for the title). A game over's video (0x1ED0A)
+ * shows a TEXT.RSC text over it (text >= 0) and keeps its last frame until a key (hold, 0x13641). */
+static void play_video_ex(game *g, const char *path, const char *next, int32_t text, bool hold)
 {
     leave_state(g);
     g->state = STATE_INTRO;
     snprintf(g->after_video, sizeof g->after_video, "%s", next ? next : "");
+    g->video_hold = hold;
+    if (text >= 0 && g->overlay && g->have_fonts) {
+        /* Wrapped to 600 pixels (0x3C08A), each line centred, the last ending at y = 470 (0x1EF10). The font
+         * is whichever was chosen last; FONT0001, the messages', is assumed. */
+        ui_rsc_text(&g->rsc, text, g->video_text, sizeof g->video_text);
+        int lh = bs_text_height(&g->font);
+        int lines = ui_text_box(NULL, &g->font, g->video_text, 0, 0, MESSAGE_WRAP) / lh + 1;
+        bs_overlay_clear(g->overlay);
+        ui_text_box(g->overlay, &g->font, g->video_text, BS_OVERLAY_WIDTH / 2, VIDEO_TEXT_BOTTOM - lines * lh,
+                    MESSAGE_WRAP);
+    }
     uint8_t *data;
     size_t size;
     bs_arena_init(&g->video_arena, 0);
@@ -549,6 +585,11 @@ static void play_video(game *g, const char *path, const char *next)
         BS_WARN("%s: %s", path, bs_result_str(r));
         after_video(g);
     }
+}
+
+static void play_video(game *g, const char *path, const char *next)
+{
+    play_video_ex(g, path, next, -1, false);
 }
 
 /* The intro plays STORY.SMK from the CD; without it, the title comes straight up. */
@@ -1093,12 +1134,27 @@ static void apply_logic(game *g, const bs_logic_output *out)
     }
 }
 
+static bool talk_has_item(void *ctx, int32_t base, int32_t number);
+
 static void activate(game *g, int32_t level_object, uint32_t event)
 {
     uint32_t o = level_object >= 0 ? bs_level_logic_find(&g->logic, BS_LOGIC_OBJECT, (uint32_t)level_object)
                                    : NO_OBJECT;
     if (o == NO_OBJECT)
         return;
+    /* Dagon's transport beam (l8tbeam, in indagon.bs6; 0x4AC18), as it starts: the player has come by it,
+     * and without the whole Savior's Hide (the dialogue's Armor) is captured 2 s later. */
+    const bs_bs6_object *lo = &g->level.level.objects[level_object];
+    if (bs_level_logic_interactive(&g->logic, o) && !g->logic.objects[o].active &&
+        lo->model < g->level.level.model_count &&
+        bs_strncasecmp(g->level.level.model_names[lo->model], "l8tbeam", 7) == 0) {
+        g->beamed = true;
+        bs_dialogue_update_vars(&g->dialogue, g->female, talk_has_item, g);
+        if (!bs_dialogue_global(&g->dialogue, "Armor")) {
+            message(g, bs_exe_message(&g->text, BS_MSG_NO_ARMOUR));
+            g->captive_at = logic_now(g) + CAPTIVE_BEAM_MS;
+        }
+    }
     bs_logic_output out;
     memcpy(g->logic.player, g->player.pos, sizeof g->logic.player);
     bs_level_logic_activate(&g->logic, o, event, logic_now(g), &out);
@@ -1362,7 +1418,18 @@ static uint32_t doorpans_open(const game *g)
     return n;
 }
 
-/* The level's exit (0x40511 → 0x3E578): checked while the player stands on an object. */
+/* The game ends with a video, between frames (GO_ENDING): a game over's keeps its last frame, with its text,
+ * until a key (0x13641, 0x3E65D), then the title (the original restarts to it through rep.dat). */
+static void end_game(game *g, const char *video, int32_t text, bool hold)
+{
+    snprintf(g->ending.video, sizeof g->ending.video, "%s", video);
+    g->ending.text = text;
+    g->ending.hold = hold;
+    g->go = GO_ENDING;
+}
+
+/* The level's exit (0x40511 → 0x3E578): checked while the player stands on an object. Level 1's joke
+ * ending comes first (0x3E639). */
 static void check_exit(game *g)
 {
     const bs_player *p = &g->player;
@@ -1379,7 +1446,9 @@ static void check_exit(game *g)
         .floor_texture = mat < g->level.scene.material_count ? g->level.scene.materials[mat].name : "",
         .doorpans_open = g->script.level_number == 1 ? doorpans_open(g) : 0,
     };
-    if (bs_level_script_exit(&g->script, &q))
+    if (bs_level_script_anchors(&g->script, q.doorpans_open))
+        end_game(g, "VIDEOS/ANCHORS.SMK", -1, true);
+    else if (bs_level_script_exit(&g->script, &q))
         g->go = GO_NEXT_LEVEL;
 }
 
@@ -1402,10 +1471,14 @@ static void make_transition(game *g)
 {
     int go = g->go;
     g->go = GO_NONE;
-    if (go == GO_NEXT_LEVEL)
+    if (go == GO_NEXT_LEVEL) {
         complete_level(g);
-    else if (go == GO_DOOR)
+    } else if (go == GO_DOOR) {
         enter_level_ex(g, g->go_file, g->go_arrival, true);
+    } else if (go == GO_ENDING) {
+        SDL_SetWindowTitle(g->window, "OpenBattlespire");
+        play_video_ex(g, g->ending.video, "", g->ending.text, g->ending.hold);
+    }
 }
 
 /* Whether a level object with a model name has moved (the level 3 gate's buttons, 0x3EBB9). */
@@ -1550,6 +1623,10 @@ static void use_object(game *g)
         message(g, bs_exe_message(&g->text, sr.messages[k]));
     if (sr.counter >= 0)
         show_counter(g, sr.counter);
+    if (g->script.level_number == 1 && bs_level_script_anchors(&g->script, doorpans_open(g))) {
+        end_game(g, "VIDEOS/ANCHORS.SMK", -1, true);
+        return;
+    }
     if (sr.activate || !sr.locked)
         activate(g, ob, BS_LOGIC_EVENT_USE);
     /* A gem gives health or spell points, then is gone for a minute (0x4D64C). */
@@ -1833,6 +1910,27 @@ static void level_skills(game *g)
     }
 }
 
+/* The player's blow reaches the NPC flats too (0x498C2). Striking Dagon (ZZ1) with the Moon Reiver in hand,
+ * having come by his beam and before his captivity takes hold, wins (0x499DB): MALE.SMK or FEMALE.SMK, then
+ * the title (the original exits). A blow at another NPC pushes the player back (not done). */
+static void check_win(game *g, const fight_env *fe)
+{
+    if (!g->beamed || !g->captive_at || !g->flat_talk || !fe->items)
+        return;
+    uint32_t w = bs_items_weapon(fe->items);
+    if (w == UINT32_MAX || fe->items->items[w].item.base != WIN_WEAPON_BASE ||
+        fe->items->items[w].item.magic != WIN_WEAPON_MAGIC)
+        return;
+    for (uint32_t i = 0; i < g->level.level.flat_count; i++) {
+        const bs_bs6_flat *fl = &g->level.level.flats[i];
+        float pos[3] = {(float)fl->pos[0], (float)fl->pos[1], (float)fl->pos[2]};
+        if (strncmp(g->flat_talk[i].code, WIN_CODE, 3) == 0 && fight_in_reach(fe, pos)) {
+            end_game(g, g->female ? "VIDEOS/FEMALE.SMK" : "VIDEOS/MALE.SMK", -1, false); /* 0x130D9 */
+            return;
+        }
+    }
+}
+
 static void run_level(game *g, float dt)
 {
     uint32_t dt_ms = (uint32_t)(fminf(dt, 0.1f) * 1000.0f);
@@ -1881,6 +1979,10 @@ static void run_level(game *g, float dt)
     bool attack = SDL_GetWindowRelativeMouseMode(g->window) && controls_held(&g->keys, ACT_ATTACK);
     if (fight_update(&g->fight, &fe, attack, dt_ms))
         update_item_world(g);
+    if (g->fight.struck) {
+        g->fight.struck = false;
+        check_win(g, &fe);
+    }
     /* A greeting that starts a conversation; speakers leaving; captivity after "ZZ" or ENDFRAME. */
     if (g->fight.talk_to != UINT32_MAX) {
         uint32_t talker = g->fight.talk_to;
@@ -1888,17 +1990,14 @@ static void run_level(game *g, float dt)
         start_talk(g, SPEAKER_MONSTER, talker);
     }
     update_leaving(g);
-    if (g->captive_at && logic_now(g) >= g->captive_at) {
+    /* Captured (0x13520): as at death, the captivity ending follows 2 s later. */
+    if (g->captive_at && logic_now(g) > g->captive_at) {
         g->captive_at = 0;
-        SDL_SetWindowTitle(g->window, "OpenBattlespire");
-        play_video(g, "VIDEOS/CHOP2.SMK", "");
-        return;
+        if (!g->fight.player_died)
+            g->fight.player_died = logic_now(g);
     }
-    if (fight_game_over(&g->fight, logic_now(g))) {
-        /* The captivity ending (0x13621): CHOP2, then the title. */
-        SDL_SetWindowTitle(g->window, "OpenBattlespire");
-        play_video(g, "VIDEOS/CHOP2.SMK", "");
-    }
+    if (fight_game_over(&g->fight, logic_now(g)))
+        end_game(g, "VIDEOS/CHOP2.SMK", TEXT_CAPTIVITY, true); /* 0x13621 */
 }
 
 /* ---- spells ---- */
@@ -2381,7 +2480,7 @@ static void talk_actions(game *g, const bs_dialogue_action *a, uint32_t n)
             }
             break;
         case BS_DLG_END_FRAME:
-            g->captive_at = logic_now(g) ? logic_now(g) : 1; /* CHOP2 at once (0x5A395) */
+            end_game(g, "VIDEOS/CHOP2.SMK", a[k].a, true); /* the conversation ends, then CHOP2 (0x5A386) */
             break;
         case BS_DLG_TELEPORT:
             if (a[k].a <= 0) {
@@ -2397,14 +2496,15 @@ static void talk_actions(game *g, const bs_dialogue_action *a, uint32_t n)
     }
 }
 
-/* The conversation ends (0x5817E): KILL's speaker goes; after "ZZ", captivity in 3 s. */
+/* The conversation ends (0x5817E): KILL's speaker goes; after Dagon's ("ZZ"), captivity in 3 s, unless the
+ * winning blow comes first. */
 static void end_talk(game *g)
 {
     talk_env env = talk_env_of(g);
     if (g->talk.d.kill)
         speaker_leaves(g, g->talk_kind, g->talk.speaker);
-    if (bs_talk_prefix(g->talk.stem, "ZZ", 2) && !g->captive_at)
-        g->captive_at = logic_now(g) + 3000;
+    if (bs_talk_prefix(g->talk.stem, "ZZ", 2))
+        g->captive_at = logic_now(g) + CAPTIVE_TALK_MS;
     talk_close(&g->talk, &env);
     if (g->had_mouse)
         SDL_SetWindowRelativeMouseMode(g->window, true);
@@ -2765,6 +2865,7 @@ static void finish_creation(game *g)
     g->character.points = cr->c.points; /* the CharacterMaker's points left go to the first level-up (0x37387) */
     bs_dialogue_state_init(&g->dialogue); /* a new game's variables (0x5AE3D) */
     g->captive_at = 0;
+    g->beamed = false;
     for (uint32_t i = 0; i < cr->c.cls.spell_count; i++) {
         bs_spell sp = cr->c.cls.spells[i];
         if (g->have_spells && sp.effect >= 1 && sp.effect <= BS_SPELL_COUNT)
@@ -2928,8 +3029,10 @@ static void load_objects(game *g, const bs_saved_game *sg)
 }
 
 /* The original's controllers after its records (0x4C3D8): each chain's, in the logic's chain order, then the
- * running chains. */
-static void load_tree_controllers(game *g, const bs_save_tree *t, bs_arena *a)
+ * running chains. The table has every space's chains (the level's, then its interiors'); the level loaded is
+ * space `here`. Without spaces, the level's chains are the whole table. */
+static void load_tree_controllers(game *g, const bs_save_tree *t, const bs_level_spaces *spaces, int here,
+                                  bs_arena *a)
 {
     bs_level_logic *lg = &g->logic;
     uint32_t *lengths = BS_ARENA_ARRAY(a, uint32_t, lg->object_count + 1);
@@ -2942,14 +3045,21 @@ static void load_tree_controllers(game *g, const bs_save_tree *t, bs_arena *a)
             chain_object[chains] = i;
             lengths[chains++] = lg->objects[i].ctrl_count;
         }
+    uint32_t first = spaces ? spaces->spaces[here].first_chain : 0;
+    bool same = !spaces || spaces->spaces[here].chain_count == chains;
+    for (uint32_t c = 0; spaces && same && c < chains; c++)
+        same = spaces->chain_lengths[first + c] == lengths[c];
     bs_save_controller *ctl;
     uint32_t n, na;
     uint8_t *active;
-    if (bs_save_controllers_read(t->controls, t->controls_size, lengths, chains, a, &ctl, &n, &active, &na) != BS_OK) {
+    if (!same || bs_save_controllers_read(t->controls, t->controls_size, spaces ? spaces->chain_lengths : lengths,
+                                          spaces ? spaces->chain_count : chains, a, &ctl, &n, &active, &na) != BS_OK) {
         BS_WARN("load: the level's controllers don't match the save's");
         return;
     }
     uint32_t at = 0;
+    for (uint32_t c = 0; c < first; c++)
+        at += spaces->chain_lengths[c];
     for (uint32_t c = 0; c < chains; c++) {
         const bs_logic_object *o = &lg->objects[chain_object[c]];
         for (uint32_t k = 0; k < o->ctrl_count; k++, at++) {
@@ -2969,16 +3079,18 @@ static void load_tree_controllers(game *g, const bs_save_tree *t, bs_arena *a)
     }
     lg->active_count = 0;
     for (uint32_t k = 0; k < na; k++)
-        if (active[k] < chains && lg->active_count < lg->object_count) {
-            uint32_t oi = chain_object[active[k]];
+        if (active[k] >= first && active[k] - first < chains && lg->active_count < lg->object_count) {
+            uint32_t oi = chain_object[active[k] - first];
             lg->objects[oi].active = true;
             lg->active[lg->active_count++] = oi;
         }
 }
 
-/* Ours: each controller by its object and place in the chain. */
+/* Ours: each controller by its object and place in the chain; those not listed haven't run. */
 static void load_controllers(game *g, const bs_saved_game *sg)
 {
+    for (uint32_t k = 0; k < g->logic.ctrl_count; k++)
+        g->logic.ctrls[k].running = g->logic.ctrls[k].reversed = false; /* STRU 120 set some */
     for (uint32_t k = 0; k < sg->ctrl_count; k++) {
         const bs_saved_ctrl *c = &sg->ctrls[k];
         uint32_t li = logic_by_id(g, c->kind, c->object);
@@ -3097,12 +3209,19 @@ static void load_items(game *g, const bs_saved_game *sg)
     }
 }
 
+/* A level file from the install, for bs_level_spaces_build. */
+static bs_result read_level_file(void *ctx, const char *file, bs_arena *a, bs_bs6_level *out)
+{
+    return other_level(ctx, file, a, out) ? BS_OK : BS_ERR_NOT_FOUND;
+}
+
 /*
  * Starts from a saved game: its level is loaded fresh (0x303FE), then the character, the items, the monsters
  * left, the level's objects and controllers, the clock and the rest are put back as the save has them. tree:
- * the original's records, for its controllers; NULL for ours.
+ * the original's records, for its controllers and automaps, with its level's spaces (or NULL); NULL for ours.
  */
-static bool apply_saved_game(game *g, const bs_saved_game *sg, const bs_save_tree *tree, bs_arena *a)
+static bool apply_saved_game(game *g, const bs_saved_game *sg, const bs_save_tree *tree,
+                             const bs_level_spaces *spaces, bs_arena *a)
 {
     /* The level: ours names it (an interior has its campaign level too); the original's has only its number. */
     const char *file = sg->level_file[0] ? sg->level_file : NULL, *campaign = NULL;
@@ -3136,6 +3255,7 @@ static bool apply_saved_game(game *g, const bs_saved_game *sg, const bs_save_tre
     g->rules = sg->rules;
     g->dialogue = sg->dialogue;
     g->captive_at = sg->captive_at;
+    g->beamed = sg->beamed;
     bs_items_free(&g->world_items);
     memset(&g->world_items, 0, sizeof g->world_items);
     bool interior = campaign && bs_strcasecmp(campaign, file) != 0;
@@ -3153,8 +3273,11 @@ static bool apply_saved_game(game *g, const bs_saved_game *sg, const bs_save_tre
     fight_env fe = fight_env_of(g);
     fight_restore(&g->fight, &fe, sg->monsters, sg->monster_count);
     load_objects(g, sg);
+    int here = 0;
+    for (uint32_t k = 1; spaces && sg->level_file[0] && k < spaces->count && !here; k++)
+        here = bs_strcasecmp(spaces->spaces[k].file, sg->level_file) == 0 ? (int)k : 0;
     if (tree)
-        load_tree_controllers(g, tree, a);
+        load_tree_controllers(g, tree, spaces, here, a);
     else
         load_controllers(g, sg);
     g->script.progress = sg->script_progress;
@@ -3187,6 +3310,18 @@ static bool apply_saved_game(game *g, const bs_saved_game *sg, const bs_save_tre
     for (uint32_t m = 0; sg->have_map && m < g->maps.count && m < BS_AUTOMAP_MAPS; m++)
         if (bs_strcasecmp(g->maps.maps[m].level, g->level.file) == 0)
             memcpy(g->seen[m], sg->seen, sizeof g->seen[m]);
+    /* The original's other spaces' grids: each has its space's door at +0x21. */
+    int32_t player = tree && spaces ? bs_save_find(tree, BS_SAVE_PLAYER_ID) : -1;
+    for (uint32_t i = 0; player >= 0 && i < tree->count; i++) {
+        const bs_save_record *r = &tree->records[i];
+        int s = r->type == BS_SAVE_AUTOMAP && r->parent_index == player ? bs_level_spaces_by_door(spaces, r->time) : -1;
+        if (s < 0 || s == here)
+            continue;
+        for (uint32_t m = 0; m < g->maps.count && m < BS_AUTOMAP_MAPS; m++)
+            if (bs_strcasecmp(g->maps.maps[m].level, spaces->spaces[s].file) == 0)
+                for (uint32_t k = 0; k < BS_SAVE_AUTOMAP_CELLS && k < r->body_size; k++)
+                    g->seen[m][k] = r->body[k] != 0;
+    }
 
     /* Where the player stands and looks. */
     float yaw = (float)sg->yaw * 2.0f * SDL_PI_F / 2048.0f;
@@ -3243,6 +3378,8 @@ static bool load_game(game *g, const char *where)
     static bs_save_tree tree;
     static bs_save_vars vars;
     static bs_saved_game sg;
+    static bs_level_spaces spaces;
+    bool have_spaces = false;
     uint8_t *data, *vars_data;
     size_t size, vars_size;
     bool ours = bs_fs_is_file(dir) ? bs_fs_read_file(dir, &a, &data, &size) == BS_OK
@@ -3260,15 +3397,27 @@ static bool load_game(game *g, const char *where)
         r = found ? bs_save_tree_parse(data, size, &a, &tree) : BS_ERR_NOT_FOUND;
         if (r == BS_OK)
             r = bs_save_vars_parse(vars_data, vars_size, &vars);
+        /* The level's interiors, which the original keeps in its save. */
+        const bs_level_info *info = NULL;
+        for (size_t i = 0; r == BS_OK && i < g->levels.count && !info; i++)
+            if (bs_level_number(&g->levels.levels[i]) == vars.level_number &&
+                bs_level_game_type(&g->levels.levels[i]) == BS_GAME_CAMPAIGN)
+                info = &g->levels.levels[i];
+        bs_bs6_level level;
+        if (info && other_level(g, info->file, &a, &level) &&
+            bs_level_spaces_build(info->file, &level, read_level_file, g, &a, &spaces) == BS_OK)
+            have_spaces = true;
+        else if (r == BS_OK)
+            BS_WARN("load: cannot read level %d's interiors", vars.level_number);
         if (r == BS_OK)
-            r = bs_save_import(&tree, &vars, g->have_spells ? g->spells : NULL, &a, &sg);
+            r = bs_save_import(&tree, &vars, have_spaces ? &spaces : NULL, g->have_spells ? g->spells : NULL, &a, &sg);
     }
     if (r != BS_OK) {
         fprintf(stderr, "openbattlespire: cannot load the saved game in %s: %s\n", dir, bs_result_str(r));
         bs_arena_free(&a);
         return false;
     }
-    bool ok = apply_saved_game(g, &sg, ours ? NULL : &tree, &a);
+    bool ok = apply_saved_game(g, &sg, ours ? NULL : &tree, have_spaces ? &spaces : NULL, &a);
     bs_arena_free(&a);
     return ok;
 }
@@ -3345,6 +3494,7 @@ static bool game_to_saved(game *g, const char *name, bs_saved_game *sg, bs_arena
     sg->level_number = g->script.level_number;
     sg->clock = logic_now(g);
     sg->captive_at = g->captive_at;
+    sg->beamed = g->beamed;
     snprintf(sg->name, sizeof sg->name, "%s", g->name ? g->name : "");
     sg->female = g->female;
     sg->race = 1;
@@ -3669,9 +3819,15 @@ static void handle_event(game *g, const SDL_Event *e)
     }
     switch (g->state) {
     case STATE_INTRO:
-        /* A key press skips the video, as in the original. */
-        if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat)
+        /* A key or a mouse button skips the video after its first frames (0x1ECBF); a last frame kept waits
+         * for a key (0x13641). */
+        if (g->video_held) {
+            if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat)
+                after_video(g);
+        } else if (((e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) || e->type == SDL_EVENT_MOUSE_BUTTON_DOWN) &&
+                   (!g->video || bs_video_position(g->video) > VIDEO_SKIP_FRAMES)) {
             after_video(g);
+        }
         break;
     case STATE_TITLE:
         if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {
@@ -3714,7 +3870,7 @@ static void handle_event(game *g, const SDL_Event *e)
             talk_result r = talk_event(&g->talk, &env, e, x, y, act, &n);
             if (r == TALK_CHOSE)
                 talk_actions(g, act, n);
-            else if (r == TALK_CLOSED)
+            if (r == TALK_CLOSED || (r == TALK_CHOSE && g->go == GO_ENDING))
                 end_talk(g);
             break;
         }
@@ -4242,16 +4398,21 @@ int main(int argc, char **argv)
 
         switch (g.state) {
         case STATE_INTRO: {
-            bool done;
-            const uint8_t *frame = bs_video_update(g.video, &done);
+            bool done = false;
+            const uint8_t *frame = g.video_held ? NULL : bs_video_update(g.video, &done);
             if (frame)
                 bs_screen_set(g.screen, frame, bs_video_width(g.video), bs_video_height(g.video));
             if (done) {
                 if (bs_video_error(g.video) != BS_OK)
                     BS_WARN("video: %s", bs_result_str(bs_video_error(g.video)));
-                after_video(&g);
+                if (g.video_hold)
+                    g.video_held = true;
+                else
+                    after_video(&g);
             }
             bs_screen_draw(g.screen, w, h);
+            if (g.state == STATE_INTRO && g.video_text[0] && g.overlay)
+                bs_overlay_draw(g.overlay, w, h);
             break;
         }
         case STATE_TITLE:

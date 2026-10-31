@@ -141,6 +141,16 @@ size_t synth_nodes(uint8_t *out, size_t cap);
 size_t synth_bs6_logic(uint8_t *out, size_t cap);
 
 /*
+ * BS6 level with doors (model "box"): for each door an object #id at x 100 i with STRU 100 [the name in 14
+ * bytes, arrival 1, 0, 0], then object #last at x 1000 with `ctrls` move controllers.
+ */
+typedef struct synth_door {
+    int32_t id;
+    const char *to;
+} synth_door;
+size_t synth_bs6_doors(uint8_t *out, size_t cap, const synth_door *doors, int n, int32_t last, int ctrls);
+
+/*
  * Item tables as GAME.EXE lays them out, after 100 bytes of padding:
  *   16 weapon records (24 bytes): i32 {i, 1 + (i >= 4), 0, i + 1, i + 6, skill}
  *     with skill 14 for record 0 and 16 for record 15 (15 + i % 5 otherwise)

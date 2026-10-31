@@ -124,6 +124,7 @@ typedef struct fight {
     bool press_used;                 /* the press sent a spell: the bow doesn't shoot with it */
     bs_hand_input last_input;
     uint32_t talk_to;                /* a monster whose greeting starts a conversation, or UINT32_MAX */
+    bool struck;                     /* a blow landed this update, for the NPC flats (the caller clears it) */
 } fight;
 
 /* Reads the creature tables from GAME.EXE's bytes. */
@@ -169,6 +170,10 @@ void fight_switch_weapon(fight *f, const fight_env *env);
 /* The 3D models to draw with the level: the weapon in hand (0x49303) or bow (0x49F7E), its nocked arrow,
  * the arrows in flight. model[] gets the base item (0..14) or FIGHT_MODEL_ARROW. Returns how many (at
  * most FIGHT_MODELS); the first *in_hand are held, and drawn over the level. */
+/* Whether a blow reaches a point (0x4975B): within 90 units, within 200 angle units of the facing (or
+ * closer than 10), and in sight. Monsters' feet, and the NPC flats' (0x498C2). */
+bool fight_in_reach(const fight_env *env, const float pos[3]);
+
 /* The monster nearest along the view, not dead, before any wall within max units, or UINT32_MAX; *distance
  * its distance (for using it: within 384 it talks, 0x4D005). */
 uint32_t fight_monster_ahead(const fight *f, const fight_env *env, float max, float *distance);

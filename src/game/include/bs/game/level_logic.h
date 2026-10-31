@@ -21,6 +21,8 @@
  *   timers start their linked objects when their period has passed.
  * - Objects that a teleport link points at move the player instead: the
  *   player is put at the object's position and its move carries them on.
+ * - An object with BS6 property 120 starts used: its moves and rotations, and
+ *   those of the objects it links to, are at their ends when the level is built.
  *
  * Times are milliseconds on a clock the caller supplies.
  */

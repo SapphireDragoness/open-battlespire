@@ -199,6 +199,11 @@ bool bs_level_script_exit(const bs_level_script *s, const bs_exit_query *q)
     }
 }
 
+bool bs_level_script_anchors(const bs_level_script *s, uint32_t doorpans_open)
+{
+    return s->level_number == 1 && doorpans_open < 1; /* 0x3E639 */
+}
+
 /* ---- sigils ---- */
 
 #define SIGIL_REACH 300.0f       /* across (0x5B580) */

@@ -76,7 +76,8 @@ int ui_text_box(bs_overlay *o, const bs_font *f, const char *s, int cx, int y, i
         size_t n = (size_t)(end - p) < sizeof line - 1 ? (size_t)(end - p) : sizeof line - 1;
         memcpy(line, p, n);
         line[n] = '\0';
-        bs_overlay_text(o, f, cx - bs_text_width(f, line) / 2, y, line);
+        if (o)
+            bs_overlay_text(o, f, cx - bs_text_width(f, line) / 2, y, line);
         last = y;
         y += lh;
         p = next;

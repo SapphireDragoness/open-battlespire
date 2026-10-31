@@ -130,12 +130,14 @@ typedef struct bs_save_character {
     uint8_t hair, eyes, mouth;        /* +0x23E */
     int32_t sound_volume;             /* +0x24A */
     int32_t creature;                 /* +0x24E */
+    bool beamed;                      /* +0x241: came by Dagon's transport beam (0x4AC68), for the win */
     uint8_t race;                     /* +0x25D */
     uint32_t weapon, secondary;       /* +0x260, +0x264: record ids */
     int32_t armour[7];                /* +0x268: helmet, pauldrons, cuirass, greaves, gauntlets, boots, shield */
     int32_t level;                    /* +0x29F (a byte in class files) */
     float anchor[3];                  /* +0x2B0: Teleport's anchor */
     uint32_t water_breathing_until;   /* +0x2C0 */
+    uint32_t captive_at;              /* +0x2DA: captured at this clock (0x13520), 0 none */
     uint8_t turn_rate;                /* +0x2E0 */
     uint32_t hotkey_items[8];         /* +0x2E7: record ids */
     uint32_t confused_until;          /* +0x30B */

@@ -28,7 +28,8 @@ static void make(bs_saved_game *g, bs_arena *a)
     snprintf(g->other_levels[0], sizeof g->other_levels[0], "l5.bs6");
     g->level_number = 5;
     g->clock = 546885;
-    g->captive_at = 0;
+    g->captive_at = 547000;
+    g->beamed = true;
     g->ride = 4321;
     snprintf(g->name, sizeof g->name, "Aldric");
     g->female = true;
@@ -144,6 +145,7 @@ static void test_round_trip(void)
     BS_CHECK(strcmp(h.name, "Aldric") == 0 && h.female && h.race == 5 && h.hair == 3 && h.mouth == 8);
     BS_CHECK(h.pos[0] == -1099.5f && h.pos[2] == 2719.25f && h.yaw == 94 && h.pitch == -12);
     BS_CHECK(h.script_progress == 2 && h.script_done);
+    BS_CHECK(h.beamed && h.captive_at == 547000);
     const bs_character *c = &h.character;
     BS_CHECK(c->level == 3 && c->health == 40 && c->health_max == 70 && c->spell_points == 12);
     BS_CHECK(c->attributes[7] == 47 && c->skills[20] == 25);

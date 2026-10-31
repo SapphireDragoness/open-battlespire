@@ -611,6 +611,27 @@ static const bs_magic_world *magic_world_of(fight *f, const fight_env *env, cons
     return w;
 }
 
+bool fight_in_reach(const fight_env *env, const float pos[3])
+{
+    float dx = pos[0] - env->player->pos[0], dy = pos[1] - env->player->pos[1], dz = pos[2] - env->player->pos[2];
+    float d = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (d > REACH)
+        return false;
+    if (d > 10.0f) {
+        int32_t facing = (int32_t)(env->player->yaw * 2048.0f / (2.0f * 3.14159265f)) & 0x7FF;
+        int32_t to = bs_angle_to(env->player->pos[0], env->player->pos[2], pos[0], pos[2]);
+        int32_t diff = (to - facing) & 0x7FF;
+        if (diff > 1024)
+            diff = 2048 - diff;
+        if (diff >= REACH_ANGLE)
+            return false;
+    }
+    float eye[3], to[3] = {pos[0], pos[1] - MONSTER_EYE, pos[2]}, t;
+    int32_t ob;
+    bs_player_eye(env->player, eye);
+    return !bs_collision_segment(env->collision, eye, to, &t, &ob);
+}
+
 /* The player's blow lands (0x4975B): every monster in reach, in front and in sight. */
 static void player_strikes(fight *f, const fight_env *env, bs_monster_events *ev)
 {
@@ -620,31 +641,12 @@ static void player_strikes(fight *f, const fight_env *env, bs_monster_events *ev
     player_fighter(env, &pf, &wi, &skill);
     if (env->character->flags & BS_FLAG_ETHEREAL)
         return; /* an ethereal player's blows pass through (0x49771) */
+    f->struck = true;
     bs_monster_world w;
     world_of(f, env, &w);
-    float eye[3];
-    bs_player_eye(env->player, eye);
-    int32_t facing = (int32_t)(env->player->yaw * 2048.0f / (2.0f * 3.14159265f)) & 0x7FF;
     for (uint32_t i = 0; i < f->monsters.count; i++) {
         bs_monster *m = &f->monsters.list[i];
-        if (m->dead || m->gone)
-            continue;
-        float dx = m->body.pos[0] - env->player->pos[0], dy = m->body.pos[1] - env->player->pos[1],
-              dz = m->body.pos[2] - env->player->pos[2];
-        float d = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (d > REACH)
-            continue;
-        if (d > 10.0f) {
-            int32_t to = bs_angle_to(env->player->pos[0], env->player->pos[2], m->body.pos[0], m->body.pos[2]);
-            int32_t diff = (to - facing) & 0x7FF;
-            if (diff > 1024)
-                diff = 2048 - diff;
-            if (diff >= REACH_ANGLE)
-                continue;
-        }
-        float meye[3] = {m->body.pos[0], m->body.pos[1] - MONSTER_EYE, m->body.pos[2]}, t;
-        int32_t ob;
-        if (bs_collision_segment(env->collision, eye, meye, &t, &ob))
+        if (m->dead || m->gone || !fight_in_reach(env, m->body.pos))
             continue;
         bs_fighter mf;
         bs_monster_fighter(m, &f->tables.creatures[m->type], &mf);

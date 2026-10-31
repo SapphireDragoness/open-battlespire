@@ -10,6 +10,7 @@
 #include "bs/formats/spells.h"
 #include "bs/game/dialogue.h"
 #include "bs/game/items.h"
+#include "bs/game/level_spaces.h"
 #include "bs/game/use.h"
 
 /*
@@ -28,6 +29,11 @@
  *   and the level script's progress.
  *
  * Times stay on the game's clock: the caller runs its clock from the saved one.
+ *
+ * The original keeps a level's interiors in its world (bs/game/level_spaces.h). With the level's spaces, a
+ * save made in an interior names it (level_file, campaign_file), its ids are those of the interior's own
+ * file, and the items of every other space are kept for their level (other_levels). The monsters and
+ * placed models are only those of the space the player is in: the engine makes the others again.
  */
 
 typedef enum bs_saved_place {
@@ -89,7 +95,7 @@ typedef struct bs_saved_ctrl {
     int32_t start[3];
 } bs_saved_ctrl;
 
-#define BS_SAVED_LEVELS 16
+#define BS_SAVED_LEVELS 32            /* a campaign level and its interiors (level 5 has 21) */
 #define BS_SAVED_MAPS 29              /* BS_AUTOMAP_MAPS */
 
 typedef struct bs_saved_game {
@@ -108,6 +114,8 @@ typedef struct bs_saved_game {
     int32_t yaw, pitch;               /* 2048 a turn; pitch + down */
     uint8_t script_progress;          /* +0x25E */
     bool script_done;                 /* 0x16FFB8 */
+    bool beamed;                      /* +0x241: came by Dagon's transport beam, for the win */
+    uint32_t captive_at;              /* +0x2DA: captivity (the beam without the armour, "ZZ") at this clock; 0 none */
     int32_t music_volume, sound_volume;
     bs_saved_item *items;
     uint32_t item_count;
@@ -128,10 +136,10 @@ typedef struct bs_saved_game {
     uint32_t sigil_gone_count;
     uint32_t links[BS_SAVE_TABLE];    /* the record ids with a dialogue link (STRU 104), for checking */
     uint32_t link_count;
-    /* Ours only (empty from the original's): */
-    uint32_t captive_at;              /* "ZZ"'s captivity at this clock; 0 none */
-    char other_levels[BS_SAVED_LEVELS][32];   /* levels left through a door, whose items are kept */
+    char other_levels[BS_SAVED_LEVELS][32];   /* levels left through a door (the original's: the level's
+                                                 interiors and the level), whose items are kept */
     uint32_t other_level_count;
+    /* Ours only (empty from the original's): */
     bs_saved_ctrl *ctrls;
     uint32_t ctrl_count;
     bool have_ctrls;                  /* the controllers are here (ours), not in the tree */
@@ -140,11 +148,12 @@ typedef struct bs_saved_game {
 } bs_saved_game;
 
 /*
- * Imports a parsed save. spells: the game's spell table (for each spell's school skill), or NULL. Arrays
- * go in arena. BS_ERR_FORMAT without a player record.
+ * Imports a parsed save. spaces: the saved level's (bs_level_spaces_build), or NULL to take every record as
+ * the campaign level's. spells: the game's spell table (for each spell's school skill), or NULL. Arrays go
+ * in arena. BS_ERR_FORMAT without a player record.
  */
-bs_result bs_save_import(const bs_save_tree *tree, const bs_save_vars *vars, const bs_spell *spells,
-                         bs_arena *arena, bs_saved_game *out);
+bs_result bs_save_import(const bs_save_tree *tree, const bs_save_vars *vars, const bs_level_spaces *spaces,
+                         const bs_spell *spells, bs_arena *arena, bs_saved_game *out);
 
 /* A saved item record as the engine's item. */
 void bs_save_import_item(const bs_save_record *r, bs_item *out);

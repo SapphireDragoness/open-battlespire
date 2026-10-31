@@ -13,10 +13,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bs/assets/assets.h"
 #include "bs/core/arena.h"
 #include "bs/core/fs.h"
 #include "bs/core/install.h"
 #include "bs/core/vfs.h"
+#include "bs/formats/bs6.h"
 #include "bs/formats/bsa.h"
 #include "bs/formats/creatures.h"
 #include "bs/formats/items.h"
@@ -25,6 +27,7 @@
 #include "bs/formats/save.h"
 #include "bs/game/game_save.h"
 #include "bs/game/items.h"
+#include "bs/game/level_spaces.h"
 #include "bs/game/save_edit.h"
 #include "bs/game/save_import.h"
 #include "bs/game/use.h"
@@ -166,6 +169,34 @@ static bool install_open(install *in, const char *dir)
         bs_bsa_close(bsa);
     }
     return true;
+}
+
+/* A level file from the install, for bs_level_spaces_build. */
+static bs_result read_level(void *ctx, const char *file, bs_arena *a, bs_bs6_level *out)
+{
+    uint8_t *data;
+    size_t size;
+    bs_result r = bs_assets_read(ctx, file, a, &data, &size);
+    return r == BS_OK ? bs_bs6_parse(data, size, a, out) : r;
+}
+
+/* The spaces of a campaign level by its number (the original keeps its interiors in the save); false
+ * without an install. */
+static bool level_spaces(install *in, int number, bs_arena *a, bs_level_spaces *out)
+{
+    const bs_level_info *info = NULL;
+    for (size_t i = 0; in->have_levels && i < in->levels.count && !info; i++)
+        if (bs_level_number(&in->levels.levels[i]) == number &&
+            bs_level_game_type(&in->levels.levels[i]) == BS_GAME_CAMPAIGN)
+            info = &in->levels.levels[i];
+    bs_assets *assets;
+    if (!info || !in->open || bs_assets_open(&in->vfs, &assets) != BS_OK)
+        return false;
+    bs_bs6_level level;
+    bool ok = read_level(assets, info->file, a, &level) == BS_OK &&
+              bs_level_spaces_build(info->file, &level, read_level, assets, a, out) == BS_OK;
+    bs_assets_close(assets);
+    return ok;
 }
 
 static void install_close(install *in)
@@ -407,9 +438,13 @@ static int cmd_convert(const char *data_dir, int argc, char **argv)
     static bs_save_tree t;
     static bs_save_vars v;
     static bs_saved_game g;
+    static bs_level_spaces spaces;
     bool ok = bs_save_tree_parse(f.tree, f.tree_size, &a, &t) == BS_OK &&
-              bs_save_vars_parse(f.vars, f.vars_size, &v) == BS_OK &&
-              bs_save_import(&t, &v, in.have_spells ? in.spells : NULL, &a, &g) == BS_OK;
+              bs_save_vars_parse(f.vars, f.vars_size, &v) == BS_OK;
+    bool have_spaces = ok && level_spaces(&in, v.level_number, &a, &spaces);
+    if (ok && !have_spaces)
+        fprintf(stderr, "bssave: the level's interiors weren't read: what's in them is left as the level's\n");
+    ok = ok && bs_save_import(&t, &v, have_spaces ? &spaces : NULL, in.have_spells ? in.spells : NULL, &a, &g) == BS_OK;
     if (!ok) {
         fprintf(stderr, "bssave: %s: not a saved game\n", f.dir);
     } else {

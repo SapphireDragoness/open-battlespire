@@ -207,6 +207,7 @@ void bs_save_character_parse(const uint8_t *body, size_t size, bs_save_character
     out->hair = b[0x23E];
     out->eyes = b[0x23F];
     out->mouth = b[0x240];
+    out->beamed = b[0x241] != 0;
     out->sound_volume = i32(b + 0x24A);
     out->creature = i32(b + 0x24E);
     out->race = b[0x25D];
@@ -218,6 +219,7 @@ void bs_save_character_parse(const uint8_t *body, size_t size, bs_save_character
     for (int k = 0; k < 3; k++)
         out->anchor[k] = f32(b + 0x2B0 + 4 * k);
     out->water_breathing_until = u32(b + 0x2C0);
+    out->captive_at = u32(b + 0x2DA);
     out->turn_rate = b[0x2E0];
     for (int k = 0; k < 8; k++)
         out->hotkey_items[k] = u32(b + 0x2E7 + 4 * k);

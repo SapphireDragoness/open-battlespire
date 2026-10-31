@@ -5,6 +5,7 @@
 
 /* RE references are GAME.EXE addresses; see docs/re/README.md, "Level logic". */
 
+#define PROP_START_USED 120
 #define PROP_SOUND 121
 #define LINK_TELEPORT 2
 #define OPTIONS_AT 16      /* option text in move and rotate data */
@@ -54,6 +55,42 @@ static void read_ctrl(const bs_bs6_record *r, bs_logic_ctrl *c)
             c->reversible |= ch == 'r' || ch == 'R';
             c->continuous |= ch == 'c' || ch == 'C';
         }
+    }
+}
+
+static int32_t trunc_i32(float v)
+{
+    return v > 2e9f ? 2000000000 : v < -2e9f ? -2000000000 : (int32_t)v;
+}
+
+/* Puts an object's moves and rotations at their ends, as if they had run (0x4C89E with 1): each from where the
+ * level placed the object. */
+static void finish_chain(bs_level_logic *lg, uint32_t oi)
+{
+    bs_logic_object *o = &lg->objects[oi];
+    int32_t pos[3], angles[3];
+    for (int a = 0; a < 3; a++) {
+        pos[a] = trunc_i32(o->pos[a]);
+        angles[a] = o->angles[a];
+    }
+    for (uint32_t k = 0; k < o->ctrl_count; k++) {
+        bs_logic_ctrl *c = &lg->ctrls[o->first_ctrl + k];
+        if (c->type == BS_LOGIC_CTRL_MOVE) {
+            for (int a = 0; a < 3; a++) {
+                c->start[a] = pos[a];
+                o->pos[a] = (float)(pos[a] + c->v[a]);
+            }
+        } else if (c->type == BS_LOGIC_CTRL_ROTATE) {
+            for (int a = 0; a < 3; a++) {
+                c->start[a] = angles[a];
+                o->angles[a] = (angles[a] + c->v[a]) & 0x7FF;
+            }
+        } else {
+            continue;
+        }
+        c->running = false;
+        c->reversed = true;
+        o->moved = true;
     }
 }
 
@@ -128,6 +165,16 @@ bs_result bs_level_logic_build(const bs_bs6_level *lv, bs_arena *arena, bs_level
                     out->objects[hit->object].teleport_target = true;
             }
         }
+        /* STRU 120: the object starts used, it and what it links to at their ends (0x23816 → 0x4C7BC):
+         * one of level 1's generators runs from the start. */
+        for (uint32_t i = 0; i < n; i++) {
+            if (!bs_bs6_logic_prop(&ent[i], PROP_START_USED))
+                continue;
+            const bs_logic_object *o = &out->objects[i];
+            finish_chain(out, i);
+            for (uint32_t k = 0; k < o->link_count; k++)
+                finish_chain(out, out->links[o->first_link + k]);
+        }
     }
     bs_arena_free(&tmp);
     free(ent);
@@ -157,11 +204,6 @@ static void add_sound(bs_logic_output *out, int32_t id, uint32_t object)
 }
 
 /* The game converts positions to integers by truncation. */
-static int32_t trunc_i32(float v)
-{
-    return v > 2e9f ? 2000000000 : v < -2e9f ? -2000000000 : (int32_t)v;
-}
-
 /* Starts an object's whole chain (0x4AF7C, 0x4BD7E). */
 static void start_chain(bs_level_logic *lg, uint32_t oi, bs_logic_output *out)
 {

@@ -185,6 +185,13 @@ static void test_exits(void)
     bs_level_script_init(&s, 8);
     BS_CHECK(!bs_level_script_exit(&s, &q));
 
+    /* Level 1's joke ending: no generator running. */
+    bs_level_script_init(&s, 1);
+    BS_CHECK(bs_level_script_anchors(&s, 0));
+    BS_CHECK(!bs_level_script_anchors(&s, 1));
+    bs_level_script_init(&s, 2);
+    BS_CHECK(!bs_level_script_anchors(&s, 0));
+
     BS_CHECK_EQ_INT(bs_next_level_number(1), 2);
     BS_CHECK_EQ_INT(bs_next_level_number(6), 8);
     BS_CHECK_EQ_INT(bs_next_level_number(8), 0);

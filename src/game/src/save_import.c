@@ -1,6 +1,9 @@
 #include "bs/game/save_import.h"
 
+#include <stdio.h>
 #include <string.h>
+
+#include "bs/core/fs.h"
 
 /* RE references are GAME.EXE addresses; see docs/formats/save.md. */
 
@@ -10,6 +13,7 @@
 #define BODY_TEAM 0x22A
 #define BODY_STATE 0x232
 #define BODY_SCRIPT 0x25E
+#define BODY_SPACE 0x298              /* the door of the space the player is in, 0 the level (0x3065C) */
 #define VARS_SCRIPT_DONE 15232        /* 0x16FFB8 */
 #define SIGIL_GONE_Y 10000            /* a dispelled sigil is moved out of the way (0x5B4B8) */
 
@@ -125,20 +129,24 @@ static void import_monster(const bs_save_record *r, int32_t team, bs_saved_monst
     m->ally = m->summoned && body_i32(r, BODY_TEAM) == team;
 }
 
-/* Where a record is: walks up to the player, a container item, the level, a level object or a monster. */
+/* Where a record is: walks up to the player, a container item, the level, a level object or a monster. A
+ * space's door holds what lies in it, as the level does; object ids are in their space's own file. */
 static void place_item(const bs_save_tree *t, uint32_t i, uint32_t player, const int32_t *item_index,
-                       const int32_t *monster_index, bs_saved_item *it)
+                       const int32_t *monster_index, const bs_level_spaces *spaces, bs_saved_item *it)
 {
     const bs_save_record *r = &t->records[i];
     memcpy(it->pos, r->pos, sizeof it->pos);
-    if (r->parent == BS_SAVE_PARENT_LEVEL) {
+    uint32_t local = r->parent;
+    if (r->parent == BS_SAVE_PARENT_LEVEL || (spaces && bs_level_spaces_by_door(spaces, r->parent) > 0)) {
         it->place = BS_SAVED_FLOOR;
         return;
     }
     if (r->parent_index < 0) {
         /* A level object that wasn't saved (a chest), by its BS6 id; the root holds nothing. */
         it->place = r->parent == BS_SAVE_PARENT_ROOT ? BS_SAVED_NOWHERE : BS_SAVED_IN_OBJECT;
-        it->ref = r->parent;
+        if (spaces)
+            bs_level_spaces_of_id(spaces, r->parent, &local);
+        it->ref = local;
         return;
     }
     uint32_t p = (uint32_t)r->parent_index;
@@ -150,7 +158,9 @@ static void place_item(const bs_save_tree *t, uint32_t i, uint32_t player, const
         it->ref = (uint32_t)item_index[p];
     } else if (pr->type == BS_SAVE_OBJECT) {
         it->place = BS_SAVED_IN_OBJECT;
-        it->ref = pr->id;
+        if (spaces)
+            bs_level_spaces_of_id(spaces, pr->id, &local);
+        it->ref = local;
     } else if (pr->type == BS_SAVE_MONSTER && monster_index[p] >= 0) {
         it->place = BS_SAVED_MONSTER;
         it->ref = (uint32_t)monster_index[p];
@@ -159,8 +169,65 @@ static void place_item(const bs_save_tree *t, uint32_t i, uint32_t player, const
     }
 }
 
-bs_result bs_save_import(const bs_save_tree *t, const bs_save_vars *v, const bs_spell *spells, bs_arena *arena,
-                         bs_saved_game *out)
+/* The space each record is in (0 without spaces): the door it hangs under, or the space of the level object
+ * holding it; what the player has is where the player is. */
+static void record_spaces(const bs_save_tree *t, const bs_level_spaces *spaces, uint32_t player, int here,
+                          int8_t *space)
+{
+    for (uint32_t i = 0; i < t->count; i++) {
+        uint32_t at = i, steps = 0;
+        int s = 0;
+        while (spaces && steps++ <= t->count) {
+            const bs_save_record *r = &t->records[at];
+            uint32_t local;
+            int d = bs_level_spaces_by_door(spaces, r->parent);
+            if (at == player) {
+                s = here;
+            } else if (d > 0) {
+                s = d;
+            } else if (r->parent_index >= 0) {
+                at = (uint32_t)r->parent_index;
+                continue;
+            } else if (r->parent > BS_SAVE_PARENT_LEVEL) {
+                s = bs_level_spaces_of_id(spaces, r->parent, &local);
+                s = s < 0 ? 0 : s;
+            }
+            break;
+        }
+        space[i] = (int8_t)s;
+    }
+}
+
+/* An id in the space the player is in, as its file has it; false if it's in another. */
+static bool id_here(const bs_level_spaces *spaces, int here, uint32_t id, uint32_t *local)
+{
+    *local = id;
+    if (!spaces)
+        return true;
+    uint32_t l;
+    int s = bs_level_spaces_of_id(spaces, id, &l);
+    if (s < 0)
+        return here == 0; /* not a level entity's id */
+    *local = l;
+    return s == here;
+}
+
+#define NO_ROOM (-2)
+
+/* The other level an item is kept in (ours: other_levels), added if new; NO_ROOM if there's no room. */
+static int32_t other_level(bs_saved_game *out, const char *file)
+{
+    for (uint32_t k = 0; k < out->other_level_count; k++)
+        if (bs_strcasecmp(out->other_levels[k], file) == 0)
+            return (int32_t)k;
+    if (out->other_level_count == BS_SAVED_LEVELS)
+        return NO_ROOM;
+    snprintf(out->other_levels[out->other_level_count], sizeof out->other_levels[0], "%s", file);
+    return (int32_t)out->other_level_count++;
+}
+
+bs_result bs_save_import(const bs_save_tree *t, const bs_save_vars *v, const bs_level_spaces *spaces,
+                         const bs_spell *spells, bs_arena *arena, bs_saved_game *out)
 {
     memset(out, 0, sizeof *out);
     int32_t player = bs_save_find(t, BS_SAVE_PLAYER_ID);
@@ -169,6 +236,16 @@ bs_result bs_save_import(const bs_save_tree *t, const bs_save_vars *v, const bs_
     const bs_save_record *pr = &t->records[player];
     bs_save_character pc;
     bs_save_character_parse(pr->body, pr->body_size, &pc);
+
+    /* The space the player is in: an interior is loaded as its own level, in the campaign level's. */
+    uint32_t door = (uint32_t)body_i32(pr, BODY_SPACE);
+    int here = spaces && door ? bs_level_spaces_by_door(spaces, door) : 0;
+    here = here < 0 ? 0 : here;
+    if (here > 0) {
+        snprintf(out->level_file, sizeof out->level_file, "%s", spaces->spaces[here].file);
+        snprintf(out->campaign_file, sizeof out->campaign_file, "%s", spaces->spaces[0].file);
+    }
+    uint32_t here_door = here > 0 ? spaces->spaces[here].door : 0;
 
     out->level_number = v->level_number;
     out->clock = v->clock;
@@ -185,17 +262,26 @@ bs_result bs_save_import(const bs_save_tree *t, const bs_save_vars *v, const bs_
         out->pitch -= 2048;
     out->script_progress = pr->body_size > BODY_SCRIPT ? pr->body[BODY_SCRIPT] : 0;
     out->script_done = v->data && v->data[VARS_SCRIPT_DONE] != 0;
+    out->beamed = pc.beamed;
+    out->captive_at = pc.captive_at;
     out->music_volume = v->music_volume;
     out->sound_volume = v->sound_volume;
     import_character(&pc, t, (uint32_t)player, spells, out);
 
-    /* Count, then fill: records index into these. */
+    int8_t *space = t->count ? BS_ARENA_ARRAY(arena, int8_t, t->count) : NULL;
+    if (t->count && !space)
+        return BS_ERR_NOMEM;
+    record_spaces(t, spaces, (uint32_t)player, here, space);
+
+    /* Count, then fill: records index into these. The monsters and placed models are those of the space the
+     * player is in (elsewhere the engine makes them again); the items are kept everywhere. */
     uint32_t n_items = 0, n_monsters = 0, n_objects = 0;
     for (uint32_t i = 0; i < t->count; i++) {
         const bs_save_record *r = &t->records[i];
+        bool top = r->parent == BS_SAVE_PARENT_LEVEL || (here_door && r->parent == here_door);
         n_items += r->type == BS_SAVE_ITEM;
-        n_monsters += r->type == BS_SAVE_MONSTER && !r->reserve;
-        n_objects += r->type == BS_SAVE_OBJECT && (r->parent == BS_SAVE_PARENT_LEVEL || r->parent_index == player);
+        n_monsters += r->type == BS_SAVE_MONSTER && !r->reserve && space[i] == here;
+        n_objects += r->type == BS_SAVE_OBJECT && space[i] == here && (top || r->parent_index == player);
     }
     int32_t *item_index = t->count ? BS_ARENA_ARRAY(arena, int32_t, t->count) : NULL;
     int32_t *monster_index = t->count ? BS_ARENA_ARRAY(arena, int32_t, t->count) : NULL;
@@ -207,52 +293,74 @@ bs_result bs_save_import(const bs_save_tree *t, const bs_save_vars *v, const bs_
         return BS_ERR_NOMEM;
 
     int32_t team = body_i32(pr, BODY_TEAM);
+    bool lost = false;
     for (uint32_t i = 0; i < t->count; i++) {
         const bs_save_record *r = &t->records[i];
+        bool top = r->parent == BS_SAVE_PARENT_LEVEL || (here_door && r->parent == here_door);
         item_index[i] = monster_index[i] = -1;
+        /* A level entity's id in its own file; the game's own (kind << 16 | n) stay. */
+        uint32_t local = r->id;
+        if (spaces && space[i] > 0) {
+            const bs_level_space *sp = &spaces->spaces[space[i]];
+            if (r->id >= sp->base && r->id - sp->base <= sp->last_id)
+                local = r->id - sp->base;
+        }
         if (r->type == BS_SAVE_ITEM) {
             item_index[i] = (int32_t)out->item_count;
             bs_saved_item *it = &out->items[out->item_count++];
             memset(it, 0, sizeof *it);
             bs_save_import_item(r, &it->item);
-            it->id = r->id;
-            it->level = -1;
+            it->id = local;
+            it->level = space[i] == here ? -1 : other_level(out, spaces->spaces[space[i]].file);
+            lost = lost || it->level == NO_ROOM;
             it->worn = (r->object[0x14] & FLAG_WORN) != 0;
             it->secondary = pc.secondary != 0 && r->id == pc.secondary;
-        } else if (r->type == BS_SAVE_MONSTER && !r->reserve) {
+        } else if (r->type == BS_SAVE_MONSTER && !r->reserve && space[i] == here) {
             monster_index[i] = (int32_t)out->monster_count;
-            import_monster(r, team, &out->monsters[out->monster_count++]);
-        } else if (r->type == BS_SAVE_OBJECT && (r->parent == BS_SAVE_PARENT_LEVEL || r->parent_index == player)) {
+            bs_saved_monster *m = &out->monsters[out->monster_count++];
+            import_monster(r, team, m);
+            m->id = local;
+        } else if (r->type == BS_SAVE_OBJECT && space[i] == here && (top || r->parent_index == player)) {
             /* The level's placed models; those in the root are the engine's own (made at 0x303FE). A boat or the
              * balloon being ridden is the player's (0x4D84D, 0x4D984). */
             if (r->parent_index == player)
-                out->ride = r->id;
+                out->ride = local;
             bs_saved_object *o = &out->objects[out->object_count++];
             memset(o, 0, sizeof *o);
-            o->id = r->id;
+            o->id = local;
             memcpy(o->pos, r->pos, sizeof o->pos);
             for (int k = 0; k < 3; k++)
                 o->angles[k] = r->angles[k] & 0x7FF;
             o->flags = r->flags;
             o->time = r->time;
-        } else if (r->type == BS_SAVE_AUTOMAP && r->parent_index == player) {
+        } else if (r->type == BS_SAVE_AUTOMAP && r->parent_index == player && r->time == here_door) {
+            /* Each space has its grid, with its door's id at +0x21 (0x454C4). */
             uint32_t n = r->body_size < BS_SAVE_AUTOMAP_CELLS ? r->body_size : BS_SAVE_AUTOMAP_CELLS;
             for (uint32_t k = 0; k < n; k++)
                 out->seen[k] = r->body[k] != 0;
             out->have_map = true;
         }
     }
-    /* Items: parents come before children in the file, but placing doesn't depend on it. */
+    /* Items: parents come before children in the file, but placing doesn't depend on it. One kept in a level
+     * there's no room for is lost. */
     for (uint32_t i = 0; i < t->count; i++)
-        if (item_index[i] >= 0)
-            place_item(t, i, (uint32_t)player, item_index, monster_index, &out->items[item_index[i]]);
+        if (item_index[i] >= 0) {
+            bs_saved_item *it = &out->items[item_index[i]];
+            place_item(t, i, (uint32_t)player, item_index, monster_index, spaces, it);
+            if (lost && it->level == NO_ROOM) {
+                it->place = BS_SAVED_NOWHERE;
+                it->level = -1;
+            }
+        }
     /* An item under one not kept is gone with it. */
     for (uint32_t k = 0; k < out->item_count; k++) {
         uint32_t at = k, steps = 0;
         while (out->items[at].place == BS_SAVED_IN_ITEM && steps++ < out->item_count)
             at = out->items[at].ref;
-        if (out->items[at].place == BS_SAVED_NOWHERE || steps > out->item_count)
+        if (out->items[at].place == BS_SAVED_NOWHERE || steps > out->item_count) {
             out->items[k].place = BS_SAVED_NOWHERE;
+            out->items[k].ref = 0;
+        }
     }
 
     /* The variables (0x5AB76), as the dialogue keeps them. */
@@ -267,13 +375,19 @@ bs_result bs_save_import(const bs_save_tree *t, const bs_save_vars *v, const bs_
             d->locals[i].vars[k] = (bs_dialogue_var){v->locals[i].vars[k].hash, v->locals[i].vars[k].value};
     }
     memcpy(d->visits, v->visits, sizeof d->visits);
-    for (int i = 0; i < 8; i++) {
-        out->leaving[i].id = v->leaving[i].id;
-        out->leaving[i].at = v->leaving[i].at;
+    /* Speakers leaving and sigils dispelled: those of the space the player is in. */
+    for (int i = 0, n = 0; i < 8; i++) {
+        uint32_t id;
+        if (!v->leaving[i].id || !id_here(spaces, here, v->leaving[i].id, &id))
+            continue;
+        out->leaving[n].id = id;
+        out->leaving[n++].at = v->leaving[i].at;
     }
-    for (uint32_t i = 0; i < v->sigil_count; i++)
-        if (v->sigils[i].y == SIGIL_GONE_Y)
-            out->sigils_gone[out->sigil_gone_count++] = v->sigils[i].id;
+    for (uint32_t i = 0; i < v->sigil_count; i++) {
+        uint32_t id;
+        if (v->sigils[i].y == SIGIL_GONE_Y && id_here(spaces, here, v->sigils[i].id, &id))
+            out->sigils_gone[out->sigil_gone_count++] = id;
+    }
     for (uint32_t i = 0; i < v->link_count; i++)
         out->links[out->link_count++] = v->links[i].id;
     return BS_OK;

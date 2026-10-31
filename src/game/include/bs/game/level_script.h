@@ -77,6 +77,15 @@ typedef struct bs_exit_query {
  */
 bool bs_level_script_exit(const bs_level_script *s, const bs_exit_query *q);
 
+/*
+ * Level 1's joke ending (0x3E653): whenever its script runs (each frame the
+ * player stands on an object, and each use of an object), if no door panel's
+ * generator is running, ANCHORS.SMK plays and the game is over. One generator
+ * runs from the start (BS6 property 120), so this happens once the player has
+ * turned them all off.
+ */
+bool bs_level_script_anchors(const bs_level_script *s, uint32_t doorpans_open);
+
 /* The level number after n (0x26997): n + 1, skipping 7; 0 after the last (8). */
 static inline int bs_next_level_number(int n)
 {

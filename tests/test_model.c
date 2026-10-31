@@ -192,7 +192,7 @@ static void test_bs6_logic(void)
     bs_arena_init(&arena, 0);
     bs_bs6_level l;
     BS_CHECK_EQ_INT(bs_bs6_parse(lv, n, &arena, &l), BS_OK);
-    BS_CHECK_EQ_INT(l.object_count, 8);
+    BS_CHECK_EQ_INT(l.object_count, 10);
     bs_bs6_logic g;
     BS_CHECK_EQ_INT(bs_bs6_entity_logic(&l.objects[0].chunk, &arena, &g), BS_OK);
     BS_CHECK_EQ_INT(g.ctrl_count, 1);
