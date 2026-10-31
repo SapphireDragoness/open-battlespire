@@ -68,13 +68,16 @@ typedef struct controls {
     uint8_t turn_rate;                       /* keyboard turning: 6 x it angle units (2048 a turn) a second;
                                                 the player's +0x2E0, a byte, so the slider's 256 is 0 */
     bool cursor_movement;                    /* Movement "Cursor" rather than "View" (+0x226 bit 0x80) */
+    bool click_swing;                        /* Weapon Swing "Click": a press swings a weapon in a random
+                                                direction, instead of the mouse's drag ("Classic"); an
+                                                addition, not in the game */
 } controls;
 
 /* A layout's bindings and the default settings. */
 void controls_set(controls *c, bool original);
 
 /* The Controls screen's Default (0x1F703): the layout's bindings, sensitivity 1, Mouse Reverse off, the
- * double-click time 8. The turn rate and the movement stay. */
+ * double-click time 8. The turn rate, the movement and the weapon swing stay. */
 void controls_default(controls *c);
 
 /* Whether an action's key or button is held now. */

@@ -97,6 +97,14 @@ static const int controls_columns[3][4] = {{176, 16, 240, 416}, {368, 16, 432, 4
 static const int controls_default_button[4] = {256, 416, 366, 453};
 static const int controls_view[4] = {451, 311, 525, 337};
 static const int controls_cursor[4] = {548, 311, 621, 337};
+/* Weapon Swing (an addition) under Movement: its title made of the words of the picture's own "SWING
+ * WEAPON" (x 17-68 and 80-147, y 306-319), the choices as text in the Movement buttons' columns. */
+static const int controls_swing_classic[4] = {451, 370, 525, 396};
+static const int controls_swing_click[4] = {548, 370, 621, 396};
+static const int controls_swing_words[2][3] = {{80, 147, 474}, {17, 68, 553}}; /* from x0, x1, to x */
+#define CONTROLS_SWING_SRC_Y 304
+#define CONTROLS_SWING_DST_Y 347
+#define CONTROLS_SWING_H 18
 static const int controls_exit[4] = {576, 416, 639, 479};
 static const int controls_help[4] = {616, 2, 637, 22};
 #define CONTROLS_HELP 21
@@ -364,6 +372,10 @@ static menu_action controls_click(menus *m, const menu_env *env, int x, int y)
         c->cursor_movement = false; /* 0x1F846 */
     else if (in(controls_cursor, x, y))
         c->cursor_movement = true;
+    else if (in(controls_swing_classic, x, y))
+        c->click_swing = false;
+    else if (in(controls_swing_click, x, y))
+        c->click_swing = true;
     else if (in(controls_exit, x, y))
         return controls_exit_screen(m, env);
     else if (in(controls_help, x, y))
@@ -710,6 +722,18 @@ static void controls_bar(bs_overlay *o, const int r[4], int w)
         bs_overlay_fill(o, r[0], r[1], w, CONTROLS_SLIDER_H, CONTROLS_SLIDER_RED);
 }
 
+/* Divides a rectangle's colours by `by`. */
+static void darken(bs_overlay *o, const int r[4], int by)
+{
+    for (int y = r[1]; y <= r[3]; y++)
+        for (int x = r[0]; x <= r[2]; x++) {
+            uint32_t p = bs_overlay_get(o, x, y);
+            uint32_t q = (p >> 24) / (uint32_t)by << 24 | ((p >> 16) & 0xFF) / (uint32_t)by << 16 |
+                         ((p >> 8) & 0xFF) / (uint32_t)by << 8 | (p & 0xFF);
+            bs_overlay_fill(o, x, y, 1, 1, q);
+        }
+}
+
 static void draw_controls(const menus *m, const menu_env *env, bs_overlay *o)
 {
     bs_overlay_image(o, bs_assets_image(env->assets, "controls.bsi"), 0, 0);
@@ -731,6 +755,31 @@ static void draw_controls(const menus *m, const menu_env *env, bs_overlay *o)
     const int *at = c->cursor_movement ? controls_cursor : controls_view;
     if (mv)
         bs_overlay_image(o, mv, at[0] - mv->x, at[1] - mv->y);
+    /* Weapon Swing: the title's gold letters copied from the picture (the teal stone behind them stays). */
+    for (int k = 0; k < 2; k++) {
+        const int *wd = controls_swing_words[k];
+        for (int y = 0; y < CONTROLS_SWING_H; y++)
+            for (int x = wd[0]; x <= wd[1]; x++) {
+                uint32_t p = bs_overlay_get(o, x, CONTROLS_SWING_SRC_Y + y);
+                int r = (int)(p >> 24), b = (int)(p >> 8 & 0xFF);
+                if (r > 80 && r > b + 30)
+                    bs_overlay_fill(o, wd[2] + x - wd[0], CONTROLS_SWING_DST_Y + y, 1, 1, p);
+            }
+    }
+    /* Its choices, on the stone darkened like the key boxes: the one chosen framed in gold, the other dimmed. */
+    for (int k = 0; k < 2; k++) {
+        const int *r = k ? controls_swing_click : controls_swing_classic;
+        bool on = c->click_swing == (k == 1);
+        darken(o, r, 2);
+        const bs_font *f = env->fonts[1];
+        const char *name = k ? "Click" : "Classic";
+        if (f)
+            text(o, f, (r[0] + r[2]) / 2 - bs_text_width(f, name) / 2, (r[1] + r[3]) / 2 - bs_text_height(f) / 2, name);
+        if (on)
+            bs_overlay_frame(o, r[0], r[1], r[2] - r[0] + 1, r[3] - r[1] + 1, 0xC89B3CFFu);
+        else
+            darken(o, r, 2);
+    }
     /* The keys, centred in their boxes; red where one is used twice; the one being set framed instead. */
     for (int a = 0; a < ACT_GAME_COUNT; a++) {
         const int *col = controls_columns[a / CONTROLS_COLUMN_ROWS];

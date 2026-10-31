@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include "bs/core/fs.h"
-#include "bs/game/level_logic.h"
 
 /* RE references are GAME.EXE addresses; see docs/formats/save.md, "Interiors". */
 
@@ -92,12 +91,17 @@ bs_result bs_level_spaces_build(const char *file, const bs_bs6_level *level, bs_
         total += out->spaces[s].chain_count;
     }
     out->chain_lengths = BS_ARENA_ARRAY(arena, uint32_t, total + 1);
-    if (!out->chain_lengths)
+    out->chain_ids = BS_ARENA_ARRAY(arena, uint32_t, total + 1);
+    out->chain_kinds = BS_ARENA_ARRAY(arena, uint8_t, total + 1);
+    if (!out->chain_lengths || !out->chain_ids || !out->chain_kinds)
         return BS_ERR_NOMEM;
     for (uint32_t s = 0; s < out->count; s++)
         for (uint32_t i = 0; i < lgs[s].object_count; i++)
-            if (lgs[s].objects[i].ctrl_count)
+            if (lgs[s].objects[i].ctrl_count) {
+                out->chain_ids[out->chain_count] = lgs[s].objects[i].entity_id;
+                out->chain_kinds[out->chain_count] = (uint8_t)lgs[s].objects[i].kind;
                 out->chain_lengths[out->chain_count++] = lgs[s].objects[i].ctrl_count;
+            }
     return BS_OK;
 }
 

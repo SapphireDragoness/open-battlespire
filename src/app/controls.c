@@ -262,6 +262,7 @@ void controls_write(const controls *c, bs_ini_writer *w)
     bs_ini_put(w, "double_click", "ticks of 18.2 a second, 8 .. 18", "%d", c->double_click);
     bs_ini_put(w, "turn_rate", "x 6 angle units a second; 0 is 128", "%d", c->turn_rate);
     bs_ini_put(w, "movement", NULL, "%s", c->cursor_movement ? "cursor" : "view");
+    bs_ini_put(w, "weapon_swing", NULL, "%s", c->click_swing ? "click" : "classic");
 }
 
 static float clampf(float v, float lo, float hi)
@@ -310,4 +311,6 @@ void controls_read(controls *c, const bs_ini_section *s)
         c->turn_rate = (uint8_t)atoi(v);
     if ((v = bs_ini_get(s, "movement")))
         c->cursor_movement = !strcmp(v, "cursor");
+    if ((v = bs_ini_get(s, "weapon_swing")))
+        c->click_swing = !strcmp(v, "click");
 }

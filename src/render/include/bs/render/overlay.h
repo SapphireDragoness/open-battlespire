@@ -41,6 +41,9 @@ void bs_overlay_image_frame(bs_overlay *o, const bs_bsi_image *img, uint32_t fra
 /* An opaque w x h RGB picture (3 bytes a pixel, top row first), top-left at (x, y). */
 void bs_overlay_rgb(bs_overlay *o, const uint8_t *rgb, int w, int h, int x, int y);
 
+/* The pixel at (x, y) as RGBA (red in the top byte), 0 outside the screen. */
+uint32_t bs_overlay_get(const bs_overlay *o, int x, int y);
+
 /* A one-pixel rectangle outline. */
 void bs_overlay_frame(bs_overlay *o, int x, int y, int w, int h, uint32_t rgba);
 

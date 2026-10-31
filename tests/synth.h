@@ -173,6 +173,10 @@ size_t synth_item_exe(uint8_t *out, size_t cap);
  */
 size_t synth_bs6_items(uint8_t *out, size_t cap);
 
+/* Objects 50 (both kinds of game), 51 (STRU 122 = 0: single player, a book), 52 (122 = 1: multiplayer, with
+ * a controller and a text), 53 (both); flats 60 (multiplayer) and 61 (both). */
+size_t synth_bs6_games(uint8_t *out, size_t cap);
+
 /*
  * Creature tables as GAME.EXE lays them out, after 100 bytes of padding
  * (docs/formats/creatures.md):

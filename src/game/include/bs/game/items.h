@@ -197,6 +197,14 @@ bs_result bs_items_take_level(bs_items *it, bs_items *out);
 /* Puts a level's items taken with bs_items_take_level back with what is carried. */
 bs_result bs_items_put_level(bs_items *it, const bs_items *level);
 
+/* The game's distance between two positions (0x45F99): across = |dx| + |dz| - the smaller / 2 on whole
+ * units (0x1B900), then the larger of that and |dy| plus a quarter of the smaller (0x1B91B). */
+int32_t bs_game_distance(const float a[3], const float b[3]);
+
+/* The inventory's floor list (no container: the player's cell of the object grid) shows only the cell's items
+ * this near the player, and the item clicked to open it however far (0x4EF5A .. 0x4EF9D, 0x3F86F4). */
+#define BS_ITEM_FLOOR_NEAR 128
+
 /* The items in a place, in order; returns how many there are (at most max stored). */
 uint32_t bs_items_list(const bs_items *it, bs_item_place place, uint32_t *out, uint32_t max);
 

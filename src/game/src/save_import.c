@@ -1,5 +1,6 @@
 #include "bs/game/save_import.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -8,6 +9,7 @@
 /* RE references are GAME.EXE addresses; see docs/formats/save.md. */
 
 #define FLAG_WORN 0x20                /* header byte +0x14 */
+#define FLAG_GONE 0x02                /* header byte +0x14: a speaker that has left (0x5817E) */
 #define FLAG_GREETED 0x40             /* header byte +0x13 */
 #define MONSTER_SUMMONED 0x10         /* +0x226 */
 #define BODY_TEAM 0x22A
@@ -16,6 +18,17 @@
 #define BODY_SPACE 0x298              /* the door of the space the player is in, 0 the level (0x3065C) */
 #define VARS_SCRIPT_DONE 15232        /* 0x16FFB8 */
 #define SIGIL_GONE_Y 10000            /* a dispelled sigil is moved out of the way (0x5B4B8) */
+/* A timed effect's body (0x295A0): the spell's name, then from +0x20 its changes, 12 bytes each in 16.16
+ * (the eight attributes, spell points, health, the 21 skills), then: */
+#define EFFECT_ATTRIBUTES 0x20
+#define EFFECT_TICK_DAMAGE 0x194
+#define EFFECT_TICK_LAST 0x198
+#define EFFECT_TICK_MS 0x19C
+#define EFFECT_ICON 0x1A0             /* the icon + 1 */
+#define EFFECT_UNTIL 0x1A4
+#define EFFECT_FLAGS 0x1A8
+#define EFFECT_POOLS 0x1B4
+#define EFFECT_BODY 0x1C0
 
 static int32_t i32(const uint8_t *p)
 {
@@ -99,6 +112,37 @@ static void import_character(const bs_save_character *pc, const bs_save_tree *t,
         if (spells && sp.effect >= 1 && sp.effect <= BS_SPELL_COUNT)
             sp.skill = spells[sp.effect - 1].skill;
         bs_character_learn(c, &sp);
+    }
+    /* Timed effects: the player's type-66 children, one per spell, which they name (0x295A0). Spell points,
+     * health and skills changed by one aren't kept: the engine's effects don't change them. */
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < t->count && n < BS_EFFECTS; i++) {
+        const bs_save_record *r = &t->records[i];
+        if (r->type != BS_SAVE_EFFECT || r->parent_index != (int32_t)player || r->body_size < EFFECT_BODY)
+            continue;
+        char name[33];
+        memcpy(name, r->body, 32);
+        name[32] = '\0';
+        int spell = 0;
+        for (int k = 0; k < BS_SPELL_COUNT && !spell; k++)
+            if (((c->spells_known >> k) & 1 && strcmp(c->book[k].name, name) == 0) ||
+                (spells && strcmp(spells[k].name, name) == 0))
+                spell = k + 1;
+        if (!spell)
+            continue;
+        bs_effect *e = &c->effects[n++];
+        memset(e, 0, sizeof *e);
+        e->spell = (uint8_t)spell;
+        e->icon = r->body[EFFECT_ICON] ? (uint8_t)(r->body[EFFECT_ICON] - 1) : 0;
+        e->until = (uint32_t)body_i32(r, EFFECT_UNTIL);
+        e->flags = (uint32_t)body_i32(r, EFFECT_FLAGS);
+        e->tick_damage = body_i32(r, EFFECT_TICK_DAMAGE);
+        e->tick_last = (uint32_t)body_i32(r, EFFECT_TICK_LAST);
+        e->tick_ms = (uint32_t)body_i32(r, EFFECT_TICK_MS);
+        for (int k = 0; k < 8; k++)
+            e->attributes[k] = body_i32(r, EFFECT_ATTRIBUTES + 12 * (uint32_t)k) >> 16; /* 0x294A0 */
+        for (int k = 0; k < 3; k++)
+            e->pools[k] = body_i32(r, EFFECT_POOLS + 4 * (uint32_t)k);
     }
     /* Hot keys: a spell's number, or 64 + n for an item (not kept: the engine's keys take spells). */
     for (int k = 0; k < BS_HOTKEYS; k++) {
@@ -212,18 +256,80 @@ static bool id_here(const bs_level_spaces *spaces, int here, uint32_t id, uint32
     return s == here;
 }
 
-#define NO_ROOM (-2)
-
-/* The other level an item is kept in (ours: other_levels), added if new; NO_ROOM if there's no room. */
-static int32_t other_level(bs_saved_game *out, const char *file)
+/* Each space's level in out: -1 the player's, else other_levels[k], which lists every other space with its
+ * monsters (the whole world is saved). Without spaces, everything is the player's level. */
+static void space_levels(const bs_level_spaces *spaces, int here, bs_saved_game *out, int32_t *group)
 {
-    for (uint32_t k = 0; k < out->other_level_count; k++)
-        if (bs_strcasecmp(out->other_levels[k], file) == 0)
-            return (int32_t)k;
-    if (out->other_level_count == BS_SAVED_LEVELS)
-        return NO_ROOM;
-    snprintf(out->other_levels[out->other_level_count], sizeof out->other_levels[0], "%s", file);
-    return (int32_t)out->other_level_count++;
+    group[0] = -1;
+    for (uint32_t s = 0; spaces && s < spaces->count; s++) {
+        group[s] = -1;
+        if ((int)s == here || out->other_level_count == BS_SAVED_LEVELS)
+            continue;
+        snprintf(out->other_levels[out->other_level_count], sizeof out->other_levels[0], "%s", spaces->spaces[s].file);
+        out->other_monsters[out->other_level_count] = true;
+        group[s] = (int32_t)out->other_level_count++;
+    }
+}
+
+/* The controllers (after the records, 0x4C3D8) as ours: each not as it began, by its chain's entity, and the
+ * running chains' entities active. */
+static bs_result import_controllers(const bs_save_tree *t, const bs_level_spaces *spaces, const int32_t *group,
+                                    bs_arena *arena, bs_saved_game *out)
+{
+    bs_save_controller *ctl;
+    uint32_t n, na;
+    uint8_t *active;
+    bs_result r = bs_save_controllers_read(t->controls, t->controls_size, spaces->chain_lengths, spaces->chain_count,
+                                           arena, &ctl, &n, &active, &na);
+    if (r != BS_OK)
+        return r;
+    out->ctrls = BS_ARENA_ARRAY(arena, bs_saved_ctrl, n + 1);
+    if (!out->ctrls)
+        return BS_ERR_NOMEM;
+    uint32_t at = 0, s = 0;
+    for (uint32_t c = 0; c < spaces->chain_count; c++) {
+        while (s + 1 < spaces->count && c >= spaces->spaces[s + 1].first_chain)
+            s++;
+        for (uint32_t k = 0; k < spaces->chain_lengths[c] && at < n; k++, at++) {
+            const bs_save_controller *sc = &ctl[at];
+            if (!(sc->flags & 3))
+                continue;
+            bs_saved_ctrl *o = &out->ctrls[out->ctrl_count++];
+            memset(o, 0, sizeof *o);
+            o->object = spaces->chain_ids[c];
+            o->kind = (bs_saved_kind)spaces->chain_kinds[c];
+            o->index = k;
+            o->reversed = (sc->flags & 2) != 0;
+            o->running = (sc->flags & 1) != 0;
+            o->level = group[s];
+            if (o->running) {
+                /* The start position or angles (+0x14, floats: 0x4BE40, 0x4BEBC); +0x20 and +0x2C aren't used. */
+                o->start_ms = sc->start;
+                for (int v = 0; v < 3; v++) {
+                    int32_t bits = i32(sc->values + 4 * v);
+                    float f;
+                    memcpy(&f, &bits, sizeof f);
+                    o->start[v] = isfinite(f) && fabsf(f) < 1e9f ? (int32_t)lroundf(f) : 0;
+                }
+            }
+        }
+    }
+    out->have_ctrls = true;
+    /* A running chain's entity is saved (it has controllers): it's active. */
+    for (uint32_t k = 0; k < na; k++) {
+        uint32_t c = active[k], sp = 0;
+        if (c >= spaces->chain_count)
+            continue;
+        while (sp + 1 < spaces->count && c >= spaces->spaces[sp + 1].first_chain)
+            sp++;
+        for (uint32_t i = 0; i < out->object_count; i++) {
+            bs_saved_object *o = &out->objects[i];
+            if (o->id == spaces->chain_ids[c] && o->kind == (bs_saved_kind)spaces->chain_kinds[c] &&
+                o->level == group[sp])
+                o->active = true;
+        }
+    }
+    return BS_OK;
 }
 
 bs_result bs_save_import(const bs_save_tree *t, const bs_save_vars *v, const bs_level_spaces *spaces,
@@ -272,16 +378,20 @@ bs_result bs_save_import(const bs_save_tree *t, const bs_save_vars *v, const bs_
     if (t->count && !space)
         return BS_ERR_NOMEM;
     record_spaces(t, spaces, (uint32_t)player, here, space);
+    int32_t group[BS_LEVEL_SPACES_MAX];
+    space_levels(spaces, here, out, group);
 
-    /* Count, then fill: records index into these. The monsters and placed models are those of the space the
-     * player is in (elsewhere the engine makes them again); the items are kept everywhere. */
+    /* Count, then fill: records index into these. A space's placed models and flats lie in it: under the
+     * level or its door; a boat or the balloon being ridden is the player's (0x4D84D, 0x4D984). Those in the
+     * root are the engine's own (made at 0x303FE). */
     uint32_t n_items = 0, n_monsters = 0, n_objects = 0;
     for (uint32_t i = 0; i < t->count; i++) {
         const bs_save_record *r = &t->records[i];
-        bool top = r->parent == BS_SAVE_PARENT_LEVEL || (here_door && r->parent == here_door);
+        bool top = r->parent == BS_SAVE_PARENT_LEVEL || r->parent_index == player ||
+                   (spaces && bs_level_spaces_by_door(spaces, r->parent) > 0);
         n_items += r->type == BS_SAVE_ITEM;
-        n_monsters += r->type == BS_SAVE_MONSTER && !r->reserve && space[i] == here;
-        n_objects += r->type == BS_SAVE_OBJECT && space[i] == here && (top || r->parent_index == player);
+        n_monsters += r->type == BS_SAVE_MONSTER && !r->reserve;
+        n_objects += (r->type == BS_SAVE_OBJECT || r->type == BS_SAVE_FLAT) && top;
     }
     int32_t *item_index = t->count ? BS_ARENA_ARRAY(arena, int32_t, t->count) : NULL;
     int32_t *monster_index = t->count ? BS_ARENA_ARRAY(arena, int32_t, t->count) : NULL;
@@ -293,10 +403,11 @@ bs_result bs_save_import(const bs_save_tree *t, const bs_save_vars *v, const bs_
         return BS_ERR_NOMEM;
 
     int32_t team = body_i32(pr, BODY_TEAM);
-    bool lost = false;
     for (uint32_t i = 0; i < t->count; i++) {
         const bs_save_record *r = &t->records[i];
-        bool top = r->parent == BS_SAVE_PARENT_LEVEL || (here_door && r->parent == here_door);
+        bool top = r->parent == BS_SAVE_PARENT_LEVEL || r->parent_index == player ||
+                   (spaces && bs_level_spaces_by_door(spaces, r->parent) > 0);
+        int32_t level = group[space[i]];
         item_index[i] = monster_index[i] = -1;
         /* A level entity's id in its own file; the game's own (kind << 16 | n) stay. */
         uint32_t local = r->id;
@@ -311,23 +422,24 @@ bs_result bs_save_import(const bs_save_tree *t, const bs_save_vars *v, const bs_
             memset(it, 0, sizeof *it);
             bs_save_import_item(r, &it->item);
             it->id = local;
-            it->level = space[i] == here ? -1 : other_level(out, spaces->spaces[space[i]].file);
-            lost = lost || it->level == NO_ROOM;
+            it->level = level;
             it->worn = (r->object[0x14] & FLAG_WORN) != 0;
             it->secondary = pc.secondary != 0 && r->id == pc.secondary;
-        } else if (r->type == BS_SAVE_MONSTER && !r->reserve && space[i] == here) {
+        } else if (r->type == BS_SAVE_MONSTER && !r->reserve) {
             monster_index[i] = (int32_t)out->monster_count;
             bs_saved_monster *m = &out->monsters[out->monster_count++];
             import_monster(r, team, m);
             m->id = local;
-        } else if (r->type == BS_SAVE_OBJECT && space[i] == here && (top || r->parent_index == player)) {
-            /* The level's placed models; those in the root are the engine's own (made at 0x303FE). A boat or the
-             * balloon being ridden is the player's (0x4D84D, 0x4D984). */
+            m->level = level;
+        } else if ((r->type == BS_SAVE_OBJECT || r->type == BS_SAVE_FLAT) && top) {
             if (r->parent_index == player)
                 out->ride = local;
             bs_saved_object *o = &out->objects[out->object_count++];
             memset(o, 0, sizeof *o);
             o->id = local;
+            o->level = level;
+            o->kind = r->type == BS_SAVE_FLAT ? BS_SAVED_KIND_FLAT : BS_SAVED_KIND_OBJECT;
+            o->gone = (r->object[0x14] & FLAG_GONE) != 0;
             memcpy(o->pos, r->pos, sizeof o->pos);
             for (int k = 0; k < 3; k++)
                 o->angles[k] = r->angles[k] & 0x7FF;
@@ -341,17 +453,13 @@ bs_result bs_save_import(const bs_save_tree *t, const bs_save_vars *v, const bs_
             out->have_map = true;
         }
     }
-    /* Items: parents come before children in the file, but placing doesn't depend on it. One kept in a level
-     * there's no room for is lost. */
+    /* Items: parents come before children in the file, but placing doesn't depend on it. */
     for (uint32_t i = 0; i < t->count; i++)
-        if (item_index[i] >= 0) {
-            bs_saved_item *it = &out->items[item_index[i]];
-            place_item(t, i, (uint32_t)player, item_index, monster_index, spaces, it);
-            if (lost && it->level == NO_ROOM) {
-                it->place = BS_SAVED_NOWHERE;
-                it->level = -1;
-            }
-        }
+        if (item_index[i] >= 0)
+            place_item(t, i, (uint32_t)player, item_index, monster_index, spaces, &out->items[item_index[i]]);
+    /* A controller table that doesn't fit the spaces leaves them as the levels begin. */
+    if (spaces && import_controllers(t, spaces, group, arena, out) == BS_ERR_NOMEM)
+        return BS_ERR_NOMEM;
     /* An item under one not kept is gone with it. */
     for (uint32_t k = 0; k < out->item_count; k++) {
         uint32_t at = k, steps = 0;
@@ -375,7 +483,7 @@ bs_result bs_save_import(const bs_save_tree *t, const bs_save_vars *v, const bs_
             d->locals[i].vars[k] = (bs_dialogue_var){v->locals[i].vars[k].hash, v->locals[i].vars[k].value};
     }
     memcpy(d->visits, v->visits, sizeof d->visits);
-    /* Speakers leaving and sigils dispelled: those of the space the player is in. */
+    /* Speakers leaving: those of the space the player is in (the engine keeps them for its level only). */
     for (int i = 0, n = 0; i < 8; i++) {
         uint32_t id;
         if (!v->leaving[i].id || !id_here(spaces, here, v->leaving[i].id, &id))
@@ -383,10 +491,14 @@ bs_result bs_save_import(const bs_save_tree *t, const bs_save_vars *v, const bs_
         out->leaving[n].id = id;
         out->leaving[n++].at = v->leaving[i].at;
     }
+    /* Sigils dispelled, each in its space's level. */
     for (uint32_t i = 0; i < v->sigil_count; i++) {
-        uint32_t id;
-        if (v->sigils[i].y == SIGIL_GONE_Y && id_here(spaces, here, v->sigils[i].id, &id))
-            out->sigils_gone[out->sigil_gone_count++] = id;
+        uint32_t id = v->sigils[i].id;
+        int s = spaces ? bs_level_spaces_of_id(spaces, id, &id) : 0;
+        if (v->sigils[i].y != SIGIL_GONE_Y || s < 0)
+            continue;
+        out->sigils_gone[out->sigil_gone_count] = id;
+        out->sigil_gone_level[out->sigil_gone_count++] = group[s];
     }
     for (uint32_t i = 0; i < v->link_count; i++)
         out->links[out->link_count++] = v->links[i].id;

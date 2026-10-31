@@ -83,6 +83,7 @@
 #define BALLOON_RETURN_MS 20000
 #define BALLOON_RETURN_SPEED 150.0f
 #define BALLOON_RETURN_HEIGHT 3000.0f
+#define HURT_TINT_MS 250     /* the red screen after a hurt (0x43970) */
 #define BOAT_ROCK_MS 2000    /* boats rock 10 either way (0x4DAA1) */
 /* Under water (0x110A8): haze.666 from 8 to 1024 in place of the level's, scaled as "C" levels' (level_view.c). */
 #define UNDERWATER_FOG_START 24.0f
@@ -165,6 +166,20 @@ typedef struct talk_info {
 
 /* Who talks: a monster, a level object or a flat. */
 typedef enum speaker_kind { SPEAKER_MONSTER, SPEAKER_OBJECT, SPEAKER_FLAT } speaker_kind;
+
+/* A level left through a door, as it was left; its items are kept beside. The arrays are malloc'd; level is
+ * -1 in each. Without `have`, its monsters, objects and controllers are made again on the way back. */
+typedef struct level_state {
+    bool have;                   /* the monsters are listed: those not are dead */
+    bs_saved_monster *monsters;
+    uint32_t monster_count;
+    bs_saved_object *objects;    /* moved, running, locked, used gems, speakers gone */
+    uint32_t object_count;
+    bs_saved_ctrl *ctrls;        /* not as they began */
+    uint32_t ctrl_count;
+    uint32_t sigils_gone[BS_SAVE_SIGILS];
+    uint32_t sigil_gone_count;
+} level_state;
 
 #define LEAVING_MAX 8                 /* speakers leaving after a while (TELEPORT n, 0x5A41C) */
 
@@ -252,6 +267,12 @@ typedef struct game {
     int32_t riding;              /* index into rides, or -1 */
     int32_t breath;              /* the breath bar's height (0x1E5E8), 0 none */
     bool underwater;             /* the view is under the water's surface: its haze */
+    uint32_t burn_ms;            /* on a burning floor: the time short of a step (bs_floor_burn) */
+    uint32_t clicked_item;       /* the item clicked to open the inventory (0x3F86F4), or UINT32_MAX */
+    bool hurt_watch;             /* health_seen holds: a drop since is a hurt */
+    int32_t health_seen;         /* the health at the last frame */
+    uint32_t hurt_at;            /* when the player was last hurt (logic clock; 0x43996) */
+    bs_voice burn_cry;           /* the last cry of pain it drew */
     float above_fog[5];          /* the fog's start, end and colour above water */
     float under_fog[3];          /* its colour under it */
     const bs_level_info *main_info;  /* the campaign level; interiors keep its number, script and music */
@@ -261,8 +282,10 @@ typedef struct game {
     struct {
         char file[32];
         bs_items items;
-    } level_cache[BS_SAVED_LEVELS]; /* levels left through a door, with their items */
+        level_state state;
+    } level_cache[BS_SAVED_LEVELS]; /* levels left through a door, as they were left */
     uint32_t level_cache_count;
+    bool loading;                /* a saved game is being put in: the level left isn't kept */
     enum { GO_NONE, GO_NEXT_LEVEL, GO_DOOR, GO_ENDING } go;   /* a transition to make between frames */
     char go_file[32];
     int32_t go_arrival;
@@ -320,6 +343,7 @@ typedef struct game {
     bool voice_on;
     talk_info *object_talk;      /* per level object */
     talk_info *flat_talk;        /* per flat */
+    bool *object_gone, *flat_gone; /* per level object, flat: a speaker that has left (+0x14 bit 2, 0x5817E) */
     struct {
         speaker_kind kind;
         uint32_t index;
@@ -622,7 +646,20 @@ static bool arrival_point(const game *g, int32_t n, float out[3])
     return false;
 }
 
-/* Keeps the current level's items aside while the player is in another (an interior). */
+static void level_state_free(level_state *st)
+{
+    free(st->monsters);
+    free(st->objects);
+    free(st->ctrls);
+    memset(st, 0, sizeof *st);
+}
+
+static bool capture_level_state(game *g, level_state *st, uint32_t *monster_index);
+static void apply_level_state(game *g, const level_state *st);
+static uint32_t logic_now(const game *g);
+
+/* Keeps the current level aside while the player is in another (an interior): its items, and its monsters,
+ * objects, controllers and sigils as they are. */
 static void cache_level(game *g)
 {
     if (!g->level.loaded || !g->level.file[0])
@@ -632,25 +669,46 @@ static void cache_level(game *g)
         k++;
     if (k == g->level_cache_count) {
         if (g->level_cache_count == sizeof g->level_cache / sizeof g->level_cache[0]) {
-            BS_WARN("too many levels to keep: %s's items will be made again", g->level.file);
+            BS_WARN("too many levels to keep: %s will be made again", g->level.file);
             bs_items_keep_carried(&g->world_items);
             return;
         }
         g->level_cache_count++;
     } else {
         bs_items_free(&g->level_cache[k].items);
+        level_state_free(&g->level_cache[k].state);
     }
     snprintf(g->level_cache[k].file, sizeof g->level_cache[k].file, "%s", g->level.file);
-    if (bs_items_take_level(&g->world_items, &g->level_cache[k].items) != BS_OK) {
+    uint32_t *monster_index = malloc(sizeof *monster_index * (g->fight.monsters.count + 1));
+    level_state *st = &g->level_cache[k].state;
+    if (!monster_index || !capture_level_state(g, st, monster_index)) {
+        BS_WARN("cannot keep %s's monsters and objects: they'll be made again", g->level.file);
+        level_state_free(st);
+    }
+    bs_items *items = &g->level_cache[k].items;
+    if (bs_items_take_level(&g->world_items, items) != BS_OK) {
         BS_WARN("cannot keep %s's items", g->level.file);
         bs_items_keep_carried(&g->world_items);
     }
+    /* What the monsters hold goes with them: by their place in the list kept. */
+    for (uint32_t i = 0; i < items->count; i++) {
+        bs_item_place *pl = &items->items[i].place;
+        if (pl->where != BS_ITEM_HELD)
+            continue;
+        if (st->have && pl->ref < g->fight.monsters.count && monster_index[pl->ref] != UINT32_MAX)
+            pl->ref = monster_index[pl->ref];
+        else
+            pl->where = BS_ITEM_GONE;
+    }
+    free(monster_index);
 }
 
 static void clear_level_cache(game *g)
 {
-    for (uint32_t k = 0; k < g->level_cache_count; k++)
+    for (uint32_t k = 0; k < g->level_cache_count; k++) {
         bs_items_free(&g->level_cache[k].items);
+        level_state_free(&g->level_cache[k].state);
+    }
     g->level_cache_count = 0;
 }
 
@@ -661,8 +719,13 @@ static void clear_level_cache(game *g)
  */
 static bool enter_level_ex(game *g, const char *file, int32_t arrival, bool through_door)
 {
+    /* The clock goes on through a door, as the original's does: times saved in the world still hold. */
+    uint32_t clock = through_door && g->level.loaded ? logic_now(g) : 0;
+    g->hurt_watch = false;
+    g->hurt_at = 0;
     if (through_door) {
-        cache_level(g);
+        if (!g->loading)
+            cache_level(g);
     } else {
         clear_level_cache(g);
         memset(g->seen, 0, sizeof g->seen); /* the automaps start blank */
@@ -708,14 +771,17 @@ static bool enter_level_ex(game *g, const char *file, int32_t arrival, bool thro
     /* What the player carries goes on; a level visited before has its items as they were left. */
     bs_items_keep_carried(&g->world_items);
     uint32_t cached = 0;
+    level_state kept = {0};
     while (cached < g->level_cache_count && bs_strcasecmp(g->level_cache[cached].file, file) != 0)
         cached++;
     if (cached < g->level_cache_count) {
         if (bs_items_put_level(&g->world_items, &g->level_cache[cached].items) != BS_OK)
             BS_WARN("%s: cannot restore the level's items", file);
         bs_items_free(&g->level_cache[cached].items);
+        kept = g->level_cache[cached].state; /* put back once the level is made */
         g->level_cache[cached] = g->level_cache[--g->level_cache_count];
-        bs_items_forget_held(&g->world_items); /* the monsters are made again */
+        if (!kept.have)
+            bs_items_forget_held(&g->world_items); /* the monsters are made again */
     } else if (g->items.tables &&
                bs_items_add_level(&g->world_items, &g->level.level, &g->items, number, multiplayer,
                                   campaign && campaign == info ? info->grid_cell : 2048, &g->rng) != BS_OK) {
@@ -806,6 +872,12 @@ static bool enter_level_ex(game *g, const char *file, int32_t arrival, bool thro
      * 0x100BE4). Monsters have theirs from their spawn points. */
     g->object_talk = BS_ARENA_ARRAY(&g->level.arena, talk_info, nobj + 1);
     g->flat_talk = BS_ARENA_ARRAY(&g->level.arena, talk_info, g->level.level.flat_count + 1);
+    g->object_gone = BS_ARENA_ARRAY(&g->level.arena, bool, nobj + 1);
+    g->flat_gone = BS_ARENA_ARRAY(&g->level.arena, bool, g->level.level.flat_count + 1);
+    if (g->object_gone)
+        memset(g->object_gone, 0, sizeof(bool) * (nobj + 1));
+    if (g->flat_gone)
+        memset(g->flat_gone, 0, sizeof(bool) * (g->level.level.flat_count + 1));
     for (int kind = 0; kind < 2 && g->object_talk && g->flat_talk; kind++) {
         uint32_t n = kind ? g->level.level.flat_count : nobj;
         for (uint32_t i = 0; i < n; i++) {
@@ -833,9 +905,9 @@ static bool enter_level_ex(game *g, const char *file, int32_t arrival, bool thro
     g->overlay_dirty = true;
 
     g->level_start_ns = SDL_GetTicksNS();
-    g->clock_base = 0;
+    g->clock_base = clock;
     g->state = STATE_LEVEL;
-    /* The monsters. */
+    /* The monsters; a level visited before as it was left. */
     fight_env fe = fight_env_of(g);
     fight_enter_level(&g->fight, &fe, info, &g->level.arena);
     /* The player starts at the START marker, or the arrival point, and drops to the floor. */
@@ -850,6 +922,10 @@ static bool enter_level_ex(game *g, const char *file, int32_t arrival, bool thro
     bs_player_init(&g->player, g->cam.pos, g->cam.yaw);
     g->tick_clock = 0;
     setup_rides(g);
+    /* A level visited before as it was left: once its monsters, boats and the rest are made. */
+    if (kept.have)
+        apply_level_state(g, &kept);
+    level_state_free(&kept);
     g->stats = (bs_player_stats){.speed = g->character.attributes[6], .strength = g->character.attributes[0],
                                  .jump_skill = g->character.skills[BS_SKILL_JUMPING], .deathmatch = multiplayer};
     bs_player_eye(&g->player, g->cam.pos);
@@ -1096,6 +1172,7 @@ static fight_env fight_env_of(game *g)
         .now_ms = logic_now(g),
         .level_number = g->script.level_number,
         .multiplayer = campaign && bs_level_game_type(campaign) != BS_GAME_CAMPAIGN,
+        .click_swing = g->keys.click_swing,
         .active_distance = campaign ? campaign->active_distance : 1500,
         .grid_cell = g->world_items.grid_cell,
         .water = g->level.water,
@@ -1223,6 +1300,8 @@ static inventory_env inventory_env_of(game *g)
     memset(&e, 0, sizeof e);
     e.items = &g->world_items;
     e.db = &g->items;
+    e.near_pos = g->player.pos;
+    e.clicked = g->clicked_item;
     e.strength = g->stats.strength;
     /* Dropped items land on the floor under the player (0x2BA21), 4 units up as monsters' loot does (0x52731). */
     float from[3] = {g->player.pos[0], g->player.pos[1] - 32.0f, g->player.pos[2]};
@@ -1329,10 +1408,20 @@ static void show_instances(game *g)
         BS_WARN("cannot show the dropped items");
 }
 
+static void open_inventory_ex(game *g, bs_item_place other, uint32_t clicked);
+
 static void open_inventory(game *g, bs_item_place other)
+{
+    open_inventory_ex(g, other, UINT32_MAX);
+}
+
+/* The inventory with another list: a container's, or the floor's (shown near the player only, but for the
+ * item clicked, `clicked`, or UINT32_MAX). */
+static void open_inventory_ex(game *g, bs_item_place other, uint32_t clicked)
 {
     if (!g->items.tables || !g->inv_background || g->inv.open)
         return;
+    g->clicked_item = clicked;
     inventory_env e = inventory_env_of(g);
     inventory_open(&g->inv, &e, other);
     bs_screen_set_bsi(g->screen, g->inv_background);
@@ -1597,6 +1686,18 @@ static void leave_ride(game *g)
  * message, and an item or a container opens the inventory screen with it:
  * a container's contents, or every item in the item's cell of the level grid.
  */
+/* A gem gives health or spell points (or takes them: level 1's 1hurt, level 4's), then is gone for a minute
+ * (0x4D64C). It goes off when used, and when stepped onto or walked into (0x4072A, 0x40760). */
+static void use_gem(game *g, int32_t ob)
+{
+    if (ob < 0 || (uint32_t)ob >= g->level.level.object_count || !g->gem_percent || !g->gem_percent[ob] ||
+        logic_now(g) < g->gem_until[ob])
+        return;
+    bs_gem_use(&g->character, g->gem_spell_points[ob], g->gem_percent[ob]);
+    g->gem_until[ob] = logic_now(g) + BS_GEM_RECHARGE_MS;
+    bs_level_renderer_show(g->level.renderer, (uint32_t)ob, false);
+}
+
 static void use_object(game *g)
 {
     float cp = cosf(g->cam.pitch);
@@ -1608,7 +1709,7 @@ static void use_object(game *g)
     bool hit = bs_collision_segment(&g->collision, g->cam.pos, to, &t, &ob);
     uint32_t dropped = dropped_along(g, fwd, hit ? t * USE_REACH : USE_REACH);
     if (dropped != UINT32_MAX) {
-        open_inventory(g, g->world_items.items[dropped].place);
+        open_inventory_ex(g, g->world_items.items[dropped].place, dropped);
         return;
     }
     if (!hit || ob < 0 || (uint32_t)ob >= g->level.level.object_count)
@@ -1629,16 +1730,11 @@ static void use_object(game *g)
     }
     if (sr.activate || !sr.locked)
         activate(g, ob, BS_LOGIC_EVENT_USE);
-    /* A gem gives health or spell points, then is gone for a minute (0x4D64C). */
-    if (g->gem_percent && g->gem_percent[ob] && logic_now(g) >= g->gem_until[ob]) {
-        bs_gem_use(&g->character, g->gem_spell_points[ob], g->gem_percent[ob]);
-        g->gem_until[ob] = logic_now(g) + BS_GEM_RECHARGE_MS;
-        bs_level_renderer_show(g->level.renderer, (uint32_t)ob, false);
-    }
+    use_gem(g, ob);
     if (g->object_message && g->object_message[ob] >= 0)
         message_rsc(g, g->object_message[ob]);
     /* An object with a dialogue code talks once used (0x4D153): level 2's gems. */
-    if (g->object_talk && g->object_talk[ob].code[0])
+    if (g->object_talk && g->object_talk[ob].code[0] && !(g->object_gone && g->object_gone[ob]))
         start_talk(g, SPEAKER_OBJECT, (uint32_t)ob);
     if (!sr.locked && g->door_name && g->door_name[ob].s[0]) {
         use_door(g, (uint32_t)ob);
@@ -1658,7 +1754,7 @@ static void use_object(game *g)
     } else {
         uint32_t i = bs_items_on_object(&g->world_items, (uint32_t)ob);
         if (i != UINT32_MAX)
-            open_inventory(g, g->world_items.items[i].place);
+            open_inventory_ex(g, g->world_items.items[i].place, i);
     }
 }
 
@@ -1682,6 +1778,42 @@ static bool carrying_too_much(game *g)
 {
     return g->items.tables &&
            bs_items_carried_weight(&g->items, &g->world_items) > 3 * bs_character_attribute(&g->character, 0);
+}
+
+/* Floors that burn (0x41817, after each frame's move): lava, mud and the like take health as fire, through
+ * the tolerances (Willpower's chance, as spells), without a push. Each hit on the player cries out mostly
+ * (0x437FD); the game's six voices keep that from piling up, so here a cry waits for the last to end. */
+static void burn_floor(game *g, uint32_t dt_ms)
+{
+    const bs_player *p = &g->player;
+    const char *tex = "";
+    if (p->on_ground && !g->fight.player_died && !p->swimming) {
+        float from[3] = {p->pos[0], p->pos[1] - 32.0f, p->pos[2]}, to[3] = {p->pos[0], p->pos[1] + 200.0f, p->pos[2]};
+        float t;
+        int32_t ob;
+        uint32_t mat = UINT32_MAX;
+        if (bs_collision_segment_material(&g->collision, from, to, &t, &ob, &mat) &&
+            mat < g->level.scene.material_count)
+            tex = g->level.scene.materials[mat].name;
+    }
+    if (!bs_floor_burns(tex)) {
+        g->burn_ms = 0;
+        return;
+    }
+    int32_t amount = bs_floor_burn(&g->burn_ms, dt_ms);
+    if (amount <= 0)
+        return;
+    bs_character *c = &g->character;
+    int32_t chance = 40 + (bs_character_attribute(c, 2) - 50) / 2; /* Willpower (0x2AAB6) */
+    int32_t d = amount * bs_element_percent(0 /* fire */, c->flags, c->resists, c->immune, c->low_tolerance,
+                                            c->critical_weakness, chance, &g->rng) / 100;
+    if (d <= 0)
+        return;
+    c->health = c->health > d ? c->health - d : 0; /* the fight sees the death */
+    if (c->health > 0 && bs_rng_range(&g->rng, 0, 32767) < 30000 &&
+        !(g->audio && bs_audio_playing(g->audio, g->burn_cry)))
+        g->burn_cry = bs_level_audio_play_at(&g->level_audio, PAIN_SOUND + (g->female ? 2 : 0) +
+                                             bs_rng_range(&g->rng, 0, 1), 0, NULL, g->cam.pos, g->cam.yaw);
 }
 
 static void walk(game *g, uint32_t dt_ms)
@@ -1778,6 +1910,7 @@ static void walk(game *g, uint32_t dt_ms)
         if (hurt)
             g->character.health = g->character.health > BS_SIGIL_DAMAGE ? g->character.health - BS_SIGIL_DAMAGE : 0;
     }
+    burn_floor(g, dt_ms);
     bs_player_eye(p, g->cam.pos);
     if (ev.jumped) {
         bs_level_audio_play_at(&g->level_audio, SOUND_JUMP, 0, NULL, g->cam.pos, g->cam.yaw);
@@ -1794,10 +1927,14 @@ static void walk(game *g, uint32_t dt_ms)
         bs_level_renderer_show(g->level.renderer, g->level.jump_pointer, charging);
     }
     /* The game's step and bump events: the object stood on or touched changed. */
-    if (ev.floor_changed && p->floor_object >= 0)
+    if (ev.floor_changed && p->floor_object >= 0) {
         activate(g, p->floor_object, BS_LOGIC_EVENT_STEP);
-    if (ev.touch_changed && p->touch_object >= 0)
+        use_gem(g, p->floor_object);
+    }
+    if (ev.touch_changed && p->touch_object >= 0) {
         activate(g, p->touch_object, BS_LOGIC_EVENT_BUMP);
+        use_gem(g, p->touch_object);
+    }
     check_exit(g);
 }
 
@@ -1934,6 +2071,15 @@ static void check_win(game *g, const fight_env *fe)
 static void run_level(game *g, float dt)
 {
     uint32_t dt_ms = (uint32_t)(fminf(dt, 0.1f) * 1000.0f);
+    /* Whatever hurt the player since the last frame (blows, spells, falls, lava, sigils, gems, a talk's half
+     * health) turns the screen red for a moment (0x43996). */
+    if (g->hurt_watch && g->character.health < g->health_seen) {
+        g->hurt_at = logic_now(g);
+        if (!g->hurt_at)
+            g->hurt_at = 1;
+    }
+    g->health_seen = g->character.health;
+    g->hurt_watch = true;
     /* Keyboard turning and looking. */
     float secs = (float)dt_ms / 1000.0f;
     float rate = controls_turn_speed(&g->keys) * secs; /* the turn rate x 6 angle units a second (0x3F19F) */
@@ -2310,10 +2456,15 @@ static void speaker_leaves(game *g, speaker_kind kind, uint32_t i)
 {
     if (kind == SPEAKER_MONSTER && i < g->fight.monsters.count)
         g->fight.monsters.list[i].gone = true;
-    else if (kind == SPEAKER_FLAT && i < g->level.level.flat_count)
+    else if (kind == SPEAKER_FLAT && i < g->level.level.flat_count) {
         bs_level_renderer_show_flat(g->level.renderer, i, false);
-    else if (kind == SPEAKER_OBJECT && i < g->level.level.object_count)
+        if (g->flat_gone)
+            g->flat_gone[i] = true;
+    } else if (kind == SPEAKER_OBJECT && i < g->level.level.object_count) {
         bs_level_renderer_show(g->level.renderer, i, false);
+        if (g->object_gone)
+            g->object_gone[i] = true;
+    }
 }
 
 /* Starts a conversation with a speaker (0x584C6). */
@@ -2521,7 +2672,7 @@ static uint32_t flat_ahead(game *g, float max, float *distance)
     float best_t = bs_collision_segment(&g->collision, g->cam.pos, to, &t, &ob) ? t * max : max;
     uint32_t best = UINT32_MAX;
     for (uint32_t i = 0; g->flat_talk && i < g->level.level.flat_count; i++) {
-        if (!g->flat_talk[i].code[0])
+        if (!g->flat_talk[i].code[0] || (g->flat_gone && g->flat_gone[i]))
             continue;
         const bs_bs6_flat *fl = &g->level.level.flats[i];
         if (strncmp(fl->name, "monster", 7) == 0)
@@ -2983,13 +3134,24 @@ static bool other_level(game *g, const char *file, bs_arena *a, bs_bs6_level *ou
 
 /* The level's placed models, flats and lights as the save left them: where they are, locked or not, a used
  * gem's return, whether their controllers run (ours). */
-static void load_objects(game *g, const bs_saved_game *sg)
+static void load_objects(game *g, const bs_saved_object *list, uint32_t count, int32_t level, uint32_t now)
 {
     g->logic.active_count = 0;
     for (uint32_t i = 0; i < g->logic.object_count; i++)
         g->logic.objects[i].active = false;
-    for (uint32_t k = 0; k < sg->object_count; k++) {
-        const bs_saved_object *so = &sg->objects[k];
+    for (uint32_t k = 0; k < count; k++) {
+        const bs_saved_object *so = &list[k];
+        if (so->level != level)
+            continue;
+        if (so->gone && so->kind == BS_SAVED_KIND_FLAT) {
+            for (uint32_t f = 0; f < g->level.level.flat_count; f++)
+                if (g->level.level.flats[f].id == so->id)
+                    speaker_leaves(g, SPEAKER_FLAT, f);
+        } else if (so->gone && so->kind == BS_SAVED_KIND_OBJECT) {
+            int32_t o = object_by_id(g, so->id);
+            if (o >= 0)
+                speaker_leaves(g, SPEAKER_OBJECT, (uint32_t)o);
+        }
         uint32_t li = logic_by_id(g, so->kind, so->id);
         int32_t i = so->kind == BS_SAVED_KIND_OBJECT ? object_by_id(g, so->id) : -1;
         if (li == NO_OBJECT && i < 0) {
@@ -3021,78 +3183,23 @@ static void load_objects(game *g, const bs_saved_game *sg)
         }
         if (g->locked)
             g->locked[i] = (so->flags & BS_SAVED_OBJECT_LOCKED) != 0;
-        if (g->gem_percent && g->gem_percent[i] && so->time > sg->clock) {
+        if (g->gem_percent && g->gem_percent[i] && so->time > now) {
             g->gem_until[i] = so->time;
             bs_level_renderer_show(g->level.renderer, (uint32_t)i, false);
         }
     }
 }
 
-/* The original's controllers after its records (0x4C3D8): each chain's, in the logic's chain order, then the
- * running chains. The table has every space's chains (the level's, then its interiors'); the level loaded is
- * space `here`. Without spaces, the level's chains are the whole table. */
-static void load_tree_controllers(game *g, const bs_save_tree *t, const bs_level_spaces *spaces, int here,
-                                  bs_arena *a)
-{
-    bs_level_logic *lg = &g->logic;
-    uint32_t *lengths = BS_ARENA_ARRAY(a, uint32_t, lg->object_count + 1);
-    uint32_t *chain_object = BS_ARENA_ARRAY(a, uint32_t, lg->object_count + 1);
-    if (!lengths || !chain_object)
-        return;
-    uint32_t chains = 0;
-    for (uint32_t i = 0; i < lg->object_count; i++)
-        if (lg->objects[i].ctrl_count) {
-            chain_object[chains] = i;
-            lengths[chains++] = lg->objects[i].ctrl_count;
-        }
-    uint32_t first = spaces ? spaces->spaces[here].first_chain : 0;
-    bool same = !spaces || spaces->spaces[here].chain_count == chains;
-    for (uint32_t c = 0; spaces && same && c < chains; c++)
-        same = spaces->chain_lengths[first + c] == lengths[c];
-    bs_save_controller *ctl;
-    uint32_t n, na;
-    uint8_t *active;
-    if (!same || bs_save_controllers_read(t->controls, t->controls_size, spaces ? spaces->chain_lengths : lengths,
-                                          spaces ? spaces->chain_count : chains, a, &ctl, &n, &active, &na) != BS_OK) {
-        BS_WARN("load: the level's controllers don't match the save's");
-        return;
-    }
-    uint32_t at = 0;
-    for (uint32_t c = 0; c < first; c++)
-        at += spaces->chain_lengths[c];
-    for (uint32_t c = 0; c < chains; c++) {
-        const bs_logic_object *o = &lg->objects[chain_object[c]];
-        for (uint32_t k = 0; k < o->ctrl_count; k++, at++) {
-            bs_logic_ctrl *lc = &lg->ctrls[o->first_ctrl + k];
-            const bs_save_controller *sc = &ctl[at];
-            lc->reversed = (sc->flags & 2) != 0;
-            lc->running = (sc->flags & 1) != 0;
-            if (lc->running) {
-                /* The start position or angles (+0x14); +0x20 and +0x2C aren't used here. */
-                lc->start_ms = sc->start;
-                for (int v = 0; v < 3; v++)
-                    lc->start[v] = (int32_t)((uint32_t)sc->values[4 * v] | (uint32_t)sc->values[4 * v + 1] << 8 |
-                                             (uint32_t)sc->values[4 * v + 2] << 16 |
-                                             (uint32_t)sc->values[4 * v + 3] << 24);
-            }
-        }
-    }
-    lg->active_count = 0;
-    for (uint32_t k = 0; k < na; k++)
-        if (active[k] >= first && active[k] - first < chains && lg->active_count < lg->object_count) {
-            uint32_t oi = chain_object[active[k] - first];
-            lg->objects[oi].active = true;
-            lg->active[lg->active_count++] = oi;
-        }
-}
-
-/* Ours: each controller by its object and place in the chain; those not listed haven't run. */
-static void load_controllers(game *g, const bs_saved_game *sg)
+/* The controllers of one level (as the items' level): each by its object and place in the chain; those not
+ * listed haven't run. */
+static void load_controllers(game *g, const bs_saved_ctrl *list, uint32_t count, int32_t level)
 {
     for (uint32_t k = 0; k < g->logic.ctrl_count; k++)
         g->logic.ctrls[k].running = g->logic.ctrls[k].reversed = false; /* STRU 120 set some */
-    for (uint32_t k = 0; k < sg->ctrl_count; k++) {
-        const bs_saved_ctrl *c = &sg->ctrls[k];
+    for (uint32_t k = 0; k < count; k++) {
+        const bs_saved_ctrl *c = &list[k];
+        if (c->level != level)
+            continue;
         uint32_t li = logic_by_id(g, c->kind, c->object);
         if (li == NO_OBJECT || c->index >= g->logic.objects[li].ctrl_count) {
             BS_WARN("load: no controller %u of %u", (unsigned)c->index, (unsigned)c->object);
@@ -3104,6 +3211,40 @@ static void load_controllers(game *g, const bs_saved_game *sg)
         lc->start_ms = c->start_ms;
         memcpy(lc->start, c->start, sizeof lc->start);
     }
+}
+
+/* The sigils dispelled (by their BS6 ids) of one level. */
+static void load_sigils(game *g, const uint32_t *ids, const int32_t *levels, uint32_t count, int32_t level)
+{
+    for (uint32_t k = 0; k < count; k++) {
+        int32_t o = levels && levels[k] != level ? -1 : object_by_id(g, ids[k]);
+        for (uint32_t s = 0; o >= 0 && s < g->sigil_count; s++)
+            if (g->sigils[s].object == (uint32_t)o) {
+                g->sigils[s].gone = true;
+                bs_level_renderer_show(g->level.renderer, (uint32_t)o, false);
+                bs_collision_remove(&g->collision, (uint32_t)o);
+            }
+    }
+}
+
+/* A level visited before, as it was left (its items are back already): its monsters, objects, controllers
+ * and sigils. */
+static void apply_level_state(game *g, const level_state *st)
+{
+    fight_env fe = fight_env_of(g);
+    fight_restore(&g->fight, &fe, st->monsters, st->monster_count);
+    load_objects(g, st->objects, st->object_count, -1, logic_now(g));
+    load_controllers(g, st->ctrls, st->ctrl_count, -1);
+    load_sigils(g, st->sigils_gone, NULL, st->sigil_gone_count, -1);
+}
+
+/* A monster's place among its level's in a save (they're listed level by level, as kept). */
+static uint32_t monster_in_level(const bs_saved_game *sg, uint32_t ref)
+{
+    uint32_t n = 0;
+    for (uint32_t k = 0; k < ref && k < sg->monster_count; k++)
+        n += sg->monsters[k].level == sg->monsters[ref].level;
+    return n;
 }
 
 /* One level's items, in the save's order: those of group (-1 the level the player is in, or another level's
@@ -3133,8 +3274,9 @@ static void items_of(const game *g, const bs_saved_game *sg, int32_t group, cons
                 place = (bs_item_place){BS_ITEM_IN_ITEM, index[si->ref]};
             break;
         case BS_SAVED_MONSTER:
-            if (group < 0) /* elsewhere the monsters are made again */
-                place = (bs_item_place){BS_ITEM_HELD, si->ref};
+            /* By its place among its level's monsters; where they're made again, it's gone with them. */
+            if (si->ref < sg->monster_count && (group < 0 || sg->other_monsters[group]))
+                place = (bs_item_place){BS_ITEM_HELD, monster_in_level(sg, si->ref)};
             break;
         case BS_SAVED_FLOOR:
             place = (bs_item_place){BS_ITEM_FLOOR, bs_items_cell(grid_cell, si->pos)};
@@ -3174,6 +3316,41 @@ static void items_of(const game *g, const bs_saved_game *sg, int32_t group, cons
     (void)g;
 }
 
+/* Another level's monsters, objects, controllers and sigils from a save, as kept (level -1 in each). */
+static bool saved_state(const bs_saved_game *sg, int32_t group, level_state *st)
+{
+    memset(st, 0, sizeof *st);
+    if (!sg->other_monsters[group])
+        return true; /* made again */
+    st->monsters = malloc(sizeof *st->monsters * (sg->monster_count + 1));
+    st->objects = malloc(sizeof *st->objects * (sg->object_count + 1));
+    st->ctrls = malloc(sizeof *st->ctrls * (sg->ctrl_count + 1));
+    if (!st->monsters || !st->objects || !st->ctrls) {
+        level_state_free(st);
+        return false;
+    }
+    for (uint32_t k = 0; k < sg->monster_count; k++)
+        if (sg->monsters[k].level == group) {
+            st->monsters[st->monster_count] = sg->monsters[k];
+            st->monsters[st->monster_count++].level = -1;
+        }
+    for (uint32_t k = 0; k < sg->object_count; k++)
+        if (sg->objects[k].level == group) {
+            st->objects[st->object_count] = sg->objects[k];
+            st->objects[st->object_count++].level = -1;
+        }
+    for (uint32_t k = 0; k < sg->ctrl_count; k++)
+        if (sg->ctrls[k].level == group) {
+            st->ctrls[st->ctrl_count] = sg->ctrls[k];
+            st->ctrls[st->ctrl_count++].level = -1;
+        }
+    for (uint32_t k = 0; k < sg->sigil_gone_count && st->sigil_gone_count < BS_SAVE_SIGILS; k++)
+        if (sg->sigil_gone_level[k] == group)
+            st->sigils_gone[st->sigil_gone_count++] = sg->sigils_gone[k];
+    st->have = true;
+    return true;
+}
+
 /* The items as the save has them: the level's and what's carried, and those kept in other levels. */
 static void load_items(game *g, const bs_saved_game *sg)
 {
@@ -3204,6 +3381,8 @@ static void load_items(game *g, const bs_saved_game *sg)
         items_of(g, sg, (int32_t)k, &other, info && bs_level_game_type(info) == BS_GAME_CAMPAIGN ? info->grid_cell : 2048,
                  c);
         snprintf(g->level_cache[g->level_cache_count].file, sizeof g->level_cache[0].file, "%s", sg->other_levels[k]);
+        if (!saved_state(sg, (int32_t)k, &g->level_cache[g->level_cache_count].state))
+            BS_WARN("load: %s's monsters and objects will be made again", sg->other_levels[k]);
         g->level_cache_count++;
         bs_arena_free(&a);
     }
@@ -3217,12 +3396,14 @@ static bs_result read_level_file(void *ctx, const char *file, bs_arena *a, bs_bs
 
 /*
  * Starts from a saved game: its level is loaded fresh (0x303FE), then the character, the items, the monsters
- * left, the level's objects and controllers, the clock and the rest are put back as the save has them. tree:
- * the original's records, for its controllers and automaps, with its level's spaces (or NULL); NULL for ours.
+ * left, the level's objects and controllers, the clock and the rest are put back as the save has them, and
+ * the other levels kept as they were left. tree: the original's records, for its automaps, with its level's
+ * spaces (or NULL); NULL for ours.
  */
 static bool apply_saved_game(game *g, const bs_saved_game *sg, const bs_save_tree *tree,
                              const bs_level_spaces *spaces, bs_arena *a)
 {
+    g->hurt_watch = false;
     /* The level: ours names it (an interior has its campaign level too); the original's has only its number. */
     const char *file = sg->level_file[0] ? sg->level_file : NULL, *campaign = NULL;
     const bs_level_info *campaign_info = NULL;
@@ -3261,7 +3442,11 @@ static bool apply_saved_game(game *g, const bs_saved_game *sg, const bs_save_tre
     bool interior = campaign && bs_strcasecmp(campaign, file) != 0;
     if (interior)
         g->main_info = campaign_info; /* kept by the door's way in */
-    if (!enter_level_ex(g, file, -1, interior))
+    clear_level_cache(g);
+    g->loading = true;
+    bool entered = enter_level_ex(g, file, -1, interior);
+    g->loading = false;
+    if (!entered)
         return false;
     memset(g->seen, 0, sizeof g->seen);
 
@@ -3270,29 +3455,27 @@ static bool apply_saved_game(game *g, const bs_saved_game *sg, const bs_save_tre
     g->clock_base = sg->clock;
     bs_level_script_init(&g->script, campaign_info ? bs_level_number(campaign_info) : sg->level_number);
     load_items(g, sg);
+    /* The level's monsters (the others are kept with their levels), objects and controllers. */
+    bs_saved_monster *here_monsters = BS_ARENA_ARRAY(a, bs_saved_monster, sg->monster_count + 1);
+    uint32_t n = 0;
+    for (uint32_t k = 0; here_monsters && k < sg->monster_count; k++)
+        if (sg->monsters[k].level < 0)
+            here_monsters[n++] = sg->monsters[k];
     fight_env fe = fight_env_of(g);
-    fight_restore(&g->fight, &fe, sg->monsters, sg->monster_count);
-    load_objects(g, sg);
+    fight_restore(&g->fight, &fe, here_monsters, n);
+    load_objects(g, sg->objects, sg->object_count, -1, sg->clock);
+    if (sg->have_ctrls)
+        load_controllers(g, sg->ctrls, sg->ctrl_count, -1);
+    else
+        BS_WARN("load: the controllers aren't in the save: they're as the level begins");
     int here = 0;
     for (uint32_t k = 1; spaces && sg->level_file[0] && k < spaces->count && !here; k++)
         here = bs_strcasecmp(spaces->spaces[k].file, sg->level_file) == 0 ? (int)k : 0;
-    if (tree)
-        load_tree_controllers(g, tree, spaces, here, a);
-    else
-        load_controllers(g, sg);
     g->script.progress = sg->script_progress;
     g->script.done = sg->script_done;
     if (sg->script_progress)
         show_counter(g, sg->script_progress);
-    for (uint32_t k = 0; k < sg->sigil_gone_count; k++) {
-        int32_t o = object_by_id(g, sg->sigils_gone[k]);
-        for (uint32_t s = 0; o >= 0 && s < g->sigil_count; s++)
-            if (g->sigils[s].object == (uint32_t)o) {
-                g->sigils[s].gone = true;
-                bs_level_renderer_show(g->level.renderer, (uint32_t)o, false);
-                bs_collision_remove(&g->collision, (uint32_t)o);
-            }
-    }
+    load_sigils(g, sg->sigils_gone, sg->sigil_gone_level, sg->sigil_gone_count, -1);
     g->leaving_count = 0;
     for (int k = 0; k < 8; k++) {
         speaker_kind kind;
@@ -3426,8 +3609,8 @@ static bool load_game(game *g, const char *where)
 
 /* The world's items for a save, those of the level the player is in first (group -1) or a kept level's
  * (group k, level its file); ids: a placed item's object's, else counted from 1000000. */
-static void save_items(const game *g, const bs_items *items, int32_t group, const bs_bs6_level *level,
-                       const uint32_t *monster_index, bs_saved_game *sg, uint32_t *next_id)
+static void save_items(const bs_items *items, int32_t group, const bs_bs6_level *level, const uint32_t *monster_index,
+                       uint32_t monster_count, bs_saved_game *sg, uint32_t *next_id)
 {
     uint32_t first = sg->item_count;
     uint32_t *index = malloc(sizeof *index * (items->count + 1));
@@ -3469,8 +3652,7 @@ static void save_items(const game *g, const bs_items *items, int32_t group, cons
             si->ref = si->place == BS_SAVED_IN_OBJECT ? level->objects[w->place.ref].id : 0;
             break;
         case BS_ITEM_HELD:
-            si->place = monster_index && w->place.ref < g->fight.monsters.count &&
-                                monster_index[w->place.ref] != UINT32_MAX
+            si->place = monster_index && w->place.ref < monster_count && monster_index[w->place.ref] != UINT32_MAX
                             ? BS_SAVED_MONSTER
                             : BS_SAVED_NOWHERE;
             si->ref = si->place == BS_SAVED_MONSTER ? monster_index[w->place.ref] : 0;
@@ -3481,6 +3663,149 @@ static void save_items(const game *g, const bs_items *items, int32_t group, cons
         }
     }
     free(index);
+}
+
+/*
+ * The level the player is in as it is now, as kept when it's left (arrays malloc'd, level -1): the monsters
+ * alive (monster_index: each of the fight's monsters' place in the list, or UINT32_MAX), the objects that
+ * moved or run, locks, gems used, boats moved and speakers gone, the controllers not as they began, and the
+ * sigils dispelled.
+ */
+static bool capture_level_state(game *g, level_state *st, uint32_t *monster_index)
+{
+    memset(st, 0, sizeof *st);
+    const bs_monsters *ms = &g->fight.monsters;
+    const bs_level_logic *lg = &g->logic;
+    const bs_bs6_level *l = &g->level.level;
+    st->monsters = malloc(sizeof *st->monsters * (ms->count + 1));
+    st->objects = malloc(sizeof *st->objects * (lg->object_count + l->object_count + l->flat_count + 1));
+    st->ctrls = malloc(sizeof *st->ctrls * (lg->ctrl_count + 1));
+    bool *listed = calloc(l->object_count + 1, sizeof *listed);
+    if (!st->monsters || !st->objects || !st->ctrls || !listed) {
+        free(listed);
+        level_state_free(st);
+        return false;
+    }
+    for (uint32_t i = 0; i < ms->count; i++) {
+        const bs_monster *m = &ms->list[i];
+        monster_index[i] = UINT32_MAX;
+        if (m->gone || m->dead)
+            continue;
+        monster_index[i] = st->monster_count;
+        bs_saved_monster *s = &st->monsters[st->monster_count++];
+        *s = (bs_saved_monster){.id = monster_id(g, i), .type = m->type, .angle = m->angle, .health = m->health,
+                                .health_max = m->health_max, .spell_points = m->spell_points,
+                                .spell_points_max = m->spell_points_max, .skill = m->skill, .flags = m->flags,
+                                .state = (int32_t)m->state, .greeted = m->greeted, .summoned = m->summoned,
+                                .ally = m->ally, .level = -1};
+        memcpy(s->pos, m->body.pos, sizeof s->pos);
+        memcpy(s->attributes, m->attributes, sizeof s->attributes);
+    }
+    uint32_t now = logic_now(g);
+    for (uint32_t i = 0; i < lg->object_count; i++) {
+        const bs_logic_object *o = &lg->objects[i];
+        bs_saved_kind kind = o->kind == BS_LOGIC_FLAT    ? BS_SAVED_KIND_FLAT
+                             : o->kind == BS_LOGIC_LIGHT ? BS_SAVED_KIND_LIGHT
+                                                         : BS_SAVED_KIND_OBJECT;
+        for (uint32_t c = 0; c < o->ctrl_count; c++) {
+            const bs_logic_ctrl *lc = &lg->ctrls[o->first_ctrl + c];
+            if (lc->reversed || lc->running)
+                st->ctrls[st->ctrl_count++] = (bs_saved_ctrl){o->entity_id, kind, c, lc->reversed, lc->running,
+                                                              lc->start_ms, {lc->start[0], lc->start[1], lc->start[2]}, -1};
+        }
+        bool level_object = o->kind == BS_LOGIC_OBJECT && o->index < l->object_count;
+        bool lock = level_object && g->lockable && g->lockable[o->index];
+        bool gem = level_object && g->gem_until && g->gem_until[o->index] > now;
+        if (!o->moved && !o->active && !lock && !gem)
+            continue;
+        bs_saved_object *so = &st->objects[st->object_count++];
+        *so = (bs_saved_object){.id = o->entity_id, .kind = kind, .active = o->active, .level = -1};
+        memcpy(so->pos, o->pos, sizeof so->pos);
+        memcpy(so->angles, o->angles, sizeof so->angles);
+        if (level_object) {
+            listed[o->index] = true;
+            so->flags = g->locked && g->locked[o->index] ? BS_SAVED_OBJECT_LOCKED : 0;
+            so->time = gem ? g->gem_until[o->index] : 0;
+        }
+    }
+    /* Objects without logic that can be locked or used as gems. */
+    for (uint32_t i = 0; i < l->object_count; i++) {
+        bool lock = g->lockable && g->lockable[i], gem = g->gem_until && g->gem_until[i] > now;
+        if (listed[i] || (!lock && !gem))
+            continue;
+        bs_saved_object *so = &st->objects[st->object_count++];
+        *so = (bs_saved_object){.id = l->objects[i].id, .kind = BS_SAVED_KIND_OBJECT,
+                                .flags = g->locked && g->locked[i] ? BS_SAVED_OBJECT_LOCKED : 0,
+                                .time = gem ? g->gem_until[i] : 0, .level = -1};
+        for (int c = 0; c < 3; c++) {
+            so->pos[c] = (float)l->objects[i].pos[c];
+            so->angles[c] = l->objects[i].angles[c];
+        }
+    }
+    /* Boats and the balloon that have moved, and the one ridden. */
+    for (uint32_t k = 0; k < g->ride_count; k++) {
+        const struct ride *r = &g->rides[k];
+        const bs_bs6_object *lo = &l->objects[r->object];
+        bool moved = (int32_t)k == g->riding || ((r->angles[1] - lo->angles[1]) & 0x7FF) != 0;
+        for (int c = 0; c < 3; c++)
+            moved = moved || fabsf(r->pos[c] - (float)lo->pos[c]) > 0.5f;
+        if (!moved || listed[r->object])
+            continue;
+        bs_saved_object *so = &st->objects[st->object_count++];
+        *so = (bs_saved_object){.id = lo->id, .kind = BS_SAVED_KIND_OBJECT, .level = -1};
+        memcpy(so->pos, r->pos, sizeof so->pos);
+        memcpy(so->angles, r->angles, sizeof so->angles);
+    }
+    /* Speakers that have left: marked where they're listed already, else listed where they stood. */
+    for (int kind = 0; kind < 2; kind++) {
+        const bool *gone = kind ? g->flat_gone : g->object_gone;
+        uint32_t n = kind ? l->flat_count : l->object_count;
+        bs_saved_kind sk = kind ? BS_SAVED_KIND_FLAT : BS_SAVED_KIND_OBJECT;
+        for (uint32_t i = 0; gone && i < n; i++) {
+            if (!gone[i])
+                continue;
+            uint32_t id = kind ? l->flats[i].id : l->objects[i].id;
+            const int32_t *pos = kind ? l->flats[i].pos : l->objects[i].pos;
+            uint32_t k = 0;
+            while (k < st->object_count && (st->objects[k].kind != sk || st->objects[k].id != id))
+                k++;
+            if (k == st->object_count) {
+                st->objects[st->object_count++] = (bs_saved_object){.id = id, .kind = sk, .level = -1};
+                for (int c = 0; c < 3; c++) {
+                    st->objects[k].pos[c] = (float)pos[c];
+                    st->objects[k].angles[c] = kind ? 0 : l->objects[i].angles[c];
+                }
+            }
+            st->objects[k].gone = true;
+        }
+    }
+    for (uint32_t s = 0; s < g->sigil_count && st->sigil_gone_count < BS_SAVE_SIGILS; s++)
+        if (g->sigils[s].gone)
+            st->sigils_gone[st->sigil_gone_count++] = l->objects[g->sigils[s].object].id;
+    free(listed);
+    st->have = true;
+    return true;
+}
+
+/* Adds a level's monsters, objects, controllers and sigils to a save, as level `level`. */
+static void put_state(bs_saved_game *sg, const level_state *st, int32_t level)
+{
+    for (uint32_t k = 0; k < st->monster_count; k++) {
+        sg->monsters[sg->monster_count] = st->monsters[k];
+        sg->monsters[sg->monster_count++].level = level;
+    }
+    for (uint32_t k = 0; k < st->object_count; k++) {
+        sg->objects[sg->object_count] = st->objects[k];
+        sg->objects[sg->object_count++].level = level;
+    }
+    for (uint32_t k = 0; k < st->ctrl_count; k++) {
+        sg->ctrls[sg->ctrl_count] = st->ctrls[k];
+        sg->ctrls[sg->ctrl_count++].level = level;
+    }
+    for (uint32_t k = 0; k < st->sigil_gone_count && sg->sigil_gone_count < BS_SAVE_SIGILS; k++) {
+        sg->sigil_gone_level[sg->sigil_gone_count] = level;
+        sg->sigils_gone[sg->sigil_gone_count++] = st->sigils_gone[k];
+    }
 }
 
 /* The game as it is now, as a saved game (arrays in a). */
@@ -3516,119 +3841,60 @@ static bool game_to_saved(game *g, const char *name, bs_saved_game *sg, bs_arena
     sg->have_maps = true;
     memcpy(sg->maps, g->seen, sizeof g->seen < sizeof sg->maps ? sizeof g->seen : sizeof sg->maps);
 
-    /* The monsters alive. */
-    const bs_monsters *ms = &g->fight.monsters;
-    uint32_t *monster_index = BS_ARENA_ARRAY(a, uint32_t, ms->count + 1);
-    sg->monsters = BS_ARENA_ARRAY(a, bs_saved_monster, ms->count + 1);
-    if (!monster_index || !sg->monsters)
+    /* The level the player is in, and those kept that can be read (their items name objects by the level's
+     * BS6 ids): items, monsters, objects, controllers and sigils, level by level. */
+    level_state here;
+    uint32_t *monster_index = BS_ARENA_ARRAY(a, uint32_t, g->fight.monsters.count + 1);
+    if (!monster_index || !capture_level_state(g, &here, monster_index)) {
+        level_state_free(&here);
         return false;
-    for (uint32_t i = 0; i < ms->count; i++) {
-        const bs_monster *m = &ms->list[i];
-        monster_index[i] = UINT32_MAX;
-        if (m->gone || m->dead)
-            continue;
-        monster_index[i] = sg->monster_count;
-        bs_saved_monster *s = &sg->monsters[sg->monster_count++];
-        *s = (bs_saved_monster){.id = monster_id(g, i), .type = m->type, .angle = m->angle, .health = m->health,
-                                .health_max = m->health_max, .spell_points = m->spell_points,
-                                .spell_points_max = m->spell_points_max, .skill = m->skill, .flags = m->flags,
-                                .state = (int32_t)m->state, .greeted = m->greeted, .summoned = m->summoned,
-                                .ally = m->ally};
-        memcpy(s->pos, m->body.pos, sizeof s->pos);
-        memcpy(s->attributes, m->attributes, sizeof s->attributes);
     }
-
-    /* The items: here, and in the levels kept. */
-    uint32_t total = g->world_items.count;
-    for (uint32_t k = 0; k < g->level_cache_count; k++)
-        total += g->level_cache[k].items.count;
-    sg->items = BS_ARENA_ARRAY(a, bs_saved_item, total + 1);
-    if (!sg->items)
-        return false;
-    uint32_t next_id = 1000000;
-    save_items(g, &g->world_items, -1, &g->level.level, monster_index, sg, &next_id);
-    for (uint32_t k = 0; k < g->level_cache_count && sg->other_level_count < BS_SAVED_LEVELS; k++) {
-        bs_bs6_level other;
-        if (!other_level(g, g->level_cache[k].file, a, &other)) {
-            BS_WARN("save: cannot read %s: its items aren't saved", g->level_cache[k].file);
+    int32_t group[BS_SAVED_LEVELS];
+    bs_bs6_level others[BS_SAVED_LEVELS];
+    uint32_t items = g->world_items.count, monsters = here.monster_count, objects = here.object_count,
+             ctrls = here.ctrl_count;
+    for (uint32_t k = 0; k < g->level_cache_count; k++) {
+        group[k] = -1;
+        if (sg->other_level_count == BS_SAVED_LEVELS)
+            continue;
+        if (!other_level(g, g->level_cache[k].file, a, &others[k])) {
+            BS_WARN("save: cannot read %s: it isn't saved", g->level_cache[k].file);
             continue;
         }
+        group[k] = (int32_t)sg->other_level_count;
         snprintf(sg->other_levels[sg->other_level_count], sizeof sg->other_levels[0], "%s", g->level_cache[k].file);
-        save_items(g, &g->level_cache[k].items, (int32_t)sg->other_level_count++, &other, NULL, sg, &next_id);
+        sg->other_monsters[sg->other_level_count++] = g->level_cache[k].state.have;
+        items += g->level_cache[k].items.count;
+        monsters += g->level_cache[k].state.monster_count;
+        objects += g->level_cache[k].state.object_count;
+        ctrls += g->level_cache[k].state.ctrl_count;
     }
-
-    /* The level's objects that moved or run, the locks, the gems used; the controllers not as they began. */
-    const bs_level_logic *lg = &g->logic;
-    const bs_bs6_level *l = &g->level.level;
-    sg->objects = BS_ARENA_ARRAY(a, bs_saved_object, lg->object_count + l->object_count + 1);
-    sg->ctrls = BS_ARENA_ARRAY(a, bs_saved_ctrl, lg->ctrl_count + 1);
-    if (!sg->objects || !sg->ctrls)
+    sg->items = BS_ARENA_ARRAY(a, bs_saved_item, items + 1);
+    sg->monsters = BS_ARENA_ARRAY(a, bs_saved_monster, monsters + 1);
+    sg->objects = BS_ARENA_ARRAY(a, bs_saved_object, objects + 1);
+    sg->ctrls = BS_ARENA_ARRAY(a, bs_saved_ctrl, ctrls + 1);
+    if (!sg->items || !sg->monsters || !sg->objects || !sg->ctrls) {
+        level_state_free(&here);
         return false;
+    }
     sg->have_ctrls = true;
-    bool *listed = BS_ARENA_ARRAY(a, bool, l->object_count + 1);
-    if (!listed)
-        return false;
-    memset(listed, 0, sizeof *listed * (l->object_count + 1));
-    uint32_t now = logic_now(g);
-    for (uint32_t i = 0; i < lg->object_count; i++) {
-        const bs_logic_object *o = &lg->objects[i];
-        bs_saved_kind kind = o->kind == BS_LOGIC_FLAT    ? BS_SAVED_KIND_FLAT
-                             : o->kind == BS_LOGIC_LIGHT ? BS_SAVED_KIND_LIGHT
-                                                         : BS_SAVED_KIND_OBJECT;
-        for (uint32_t c = 0; c < o->ctrl_count; c++) {
-            const bs_logic_ctrl *lc = &lg->ctrls[o->first_ctrl + c];
-            if (lc->reversed || lc->running)
-                sg->ctrls[sg->ctrl_count++] = (bs_saved_ctrl){o->entity_id, kind, c, lc->reversed, lc->running,
-                                                              lc->start_ms, {lc->start[0], lc->start[1], lc->start[2]}};
-        }
-        bool level_object = o->kind == BS_LOGIC_OBJECT && o->index < l->object_count;
-        bool lock = level_object && g->lockable && g->lockable[o->index];
-        bool gem = level_object && g->gem_until && g->gem_until[o->index] > now;
-        if (!o->moved && !o->active && !lock && !gem)
+    put_state(sg, &here, -1);
+    uint32_t next_id = 1000000;
+    save_items(&g->world_items, -1, &g->level.level, monster_index, g->fight.monsters.count, sg, &next_id);
+    level_state_free(&here);
+    for (uint32_t k = 0; k < g->level_cache_count; k++) {
+        if (group[k] < 0)
             continue;
-        bs_saved_object *so = &sg->objects[sg->object_count++];
-        *so = (bs_saved_object){.id = o->entity_id, .kind = kind, .active = o->active};
-        memcpy(so->pos, o->pos, sizeof so->pos);
-        memcpy(so->angles, o->angles, sizeof so->angles);
-        if (level_object) {
-            listed[o->index] = true;
-            so->flags = g->locked && g->locked[o->index] ? BS_SAVED_OBJECT_LOCKED : 0;
-            so->time = gem ? g->gem_until[o->index] : 0;
-        }
-    }
-    /* Objects without logic that can be locked or used as gems. */
-    for (uint32_t i = 0; i < l->object_count; i++) {
-        bool lock = g->lockable && g->lockable[i], gem = g->gem_until && g->gem_until[i] > now;
-        if (listed[i] || (!lock && !gem))
-            continue;
-        bs_saved_object *so = &sg->objects[sg->object_count++];
-        *so = (bs_saved_object){.id = l->objects[i].id, .kind = BS_SAVED_KIND_OBJECT,
-                                .flags = g->locked && g->locked[i] ? BS_SAVED_OBJECT_LOCKED : 0,
-                                .time = gem ? g->gem_until[i] : 0};
-        for (int c = 0; c < 3; c++) {
-            so->pos[c] = (float)l->objects[i].pos[c];
-            so->angles[c] = l->objects[i].angles[c];
-        }
-    }
-    /* Boats and the balloon that have moved, and the one ridden. */
-    for (uint32_t k = 0; k < g->ride_count; k++) {
-        const struct ride *r = &g->rides[k];
-        const bs_bs6_object *lo = &l->objects[r->object];
-        bool moved = (int32_t)k == g->riding || ((r->angles[1] - lo->angles[1]) & 0x7FF) != 0;
-        for (int c = 0; c < 3; c++)
-            moved = moved || fabsf(r->pos[c] - (float)lo->pos[c]) > 0.5f;
-        if (!moved || listed[r->object])
-            continue;
-        bs_saved_object *so = &sg->objects[sg->object_count++];
-        *so = (bs_saved_object){.id = lo->id, .kind = BS_SAVED_KIND_OBJECT};
-        memcpy(so->pos, r->pos, sizeof so->pos);
-        memcpy(so->angles, r->angles, sizeof so->angles);
+        const level_state *st = &g->level_cache[k].state;
+        /* Its monsters' loot by their place in the save. */
+        uint32_t *map = BS_ARENA_ARRAY(a, uint32_t, st->monster_count + 1);
+        for (uint32_t i = 0; map && i < st->monster_count; i++)
+            map[i] = sg->monster_count + i;
+        put_state(sg, st, group[k]);
+        save_items(&g->level_cache[k].items, group[k], &others[k], map, st->monster_count, sg, &next_id);
     }
     if (g->riding >= 0)
-        sg->ride = l->objects[g->rides[g->riding].object].id;
-    for (uint32_t s = 0; s < g->sigil_count && sg->sigil_gone_count < BS_SAVE_SIGILS; s++)
-        if (g->sigils[s].gone)
-            sg->sigils_gone[sg->sigil_gone_count++] = l->objects[g->sigils[s].object].id;
+        sg->ride = g->level.level.objects[g->rides[g->riding].object].id;
     for (uint32_t k = 0; k < g->leaving_count && k < 8; k++) {
         sg->leaving[k].id = speaker_id(g, g->leaving[k].kind, g->leaving[k].index);
         sg->leaving[k].at = g->leaving[k].at;
@@ -4533,6 +4799,9 @@ int main(int argc, char **argv)
                 }
                 bs_overlay_draw(g.overlay, w, h);
             }
+            /* For 250 ms after a hurt the whole screen keeps only its red (0x43957, TINT.555). */
+            if (g.hurt_at && logic_now(&g) >= g.hurt_at && logic_now(&g) - g.hurt_at <= HURT_TINT_MS)
+                bs_screen_keep_red(w, h);
             if (g.picture_pending) {
                 g.picture_pending = false;
                 capture_picture(&g, w, h);

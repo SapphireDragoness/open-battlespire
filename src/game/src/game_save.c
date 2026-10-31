@@ -41,6 +41,13 @@ static const char *yes(bool b)
 
 /* ---- writing ---- */
 
+/* `level`: one of the other levels (none for the player's). */
+static void put_level(bs_ini_writer *w, const bs_saved_game *g, int32_t level)
+{
+    if (level >= 0 && (uint32_t)level < g->other_level_count)
+        bs_ini_put_str(w, "level", g->other_levels[level]);
+}
+
 static void put_ints(bs_ini_writer *w, const char *key, const char *comment, const int32_t *v, int n)
 {
     char s[256];
@@ -196,8 +203,12 @@ bs_result bs_game_save_write(const bs_saved_game *g, const bs_game_save_names *n
     bs_ini_put_str(&w, "level", g->level_file);
     if (g->campaign_file[0])
         bs_ini_put_str(&w, "campaign", g->campaign_file);
-    for (uint32_t k = 0; k < g->other_level_count; k++)
-        bs_ini_put_str(&w, "other_level", g->other_levels[k]);
+    for (uint32_t k = 0; k < g->other_level_count; k++) {
+        if (g->other_monsters[k])
+            bs_ini_put(&w, "other_level", "its monsters are listed", "%s monsters", g->other_levels[k]);
+        else
+            bs_ini_put_str(&w, "other_level", g->other_levels[k]);
+    }
     bs_ini_put(&w, "level_number", NULL, "%d", g->level_number);
     bs_ini_put(&w, "clock", "ms", "%u", (unsigned)g->clock);
     if (g->beamed)
@@ -242,8 +253,7 @@ bs_result bs_game_save_write(const bs_saved_game *g, const bs_game_save_names *n
             bs_ini_put(&w, "worn", NULL, "yes");
         if (it->secondary)
             bs_ini_put(&w, "secondary", NULL, "yes");
-        if (it->level >= 0 && (uint32_t)it->level < g->other_level_count)
-            bs_ini_put_str(&w, "level", g->other_levels[it->level]);
+        put_level(&w, g, it->level);
     }
     for (uint32_t i = 0; i < g->monster_count; i++) {
         const bs_saved_monster *m = &g->monsters[i];
@@ -266,6 +276,7 @@ bs_result bs_game_save_write(const bs_saved_game *g, const bs_game_save_names *n
             bs_ini_put(&w, "summoned", NULL, "yes");
         if (m->ally)
             bs_ini_put(&w, "ally", NULL, "yes");
+        put_level(&w, g, m->level);
     }
     for (uint32_t i = 0; i < g->object_count; i++) {
         const bs_saved_object *o = &g->objects[i];
@@ -281,6 +292,9 @@ bs_result bs_game_save_write(const bs_saved_game *g, const bs_game_save_names *n
             bs_ini_put(&w, "gem_until", "a used gem comes back", "%u", (unsigned)o->time);
         if (o->active)
             bs_ini_put(&w, "active", NULL, "yes");
+        if (o->gone)
+            bs_ini_put(&w, "gone", "a speaker that has left", "yes");
+        put_level(&w, g, o->level);
     }
     for (uint32_t i = 0; i < g->ctrl_count; i++) {
         const bs_saved_ctrl *c = &g->ctrls[i];
@@ -295,13 +309,20 @@ bs_result bs_game_save_write(const bs_saved_game *g, const bs_game_save_names *n
             bs_ini_put(&w, "start_ms", NULL, "%u", (unsigned)c->start_ms);
             put_ints(&w, "start", NULL, c->start, 3);
         }
+        put_level(&w, g, c->level);
     }
-    if (g->sigil_gone_count) {
-        bs_ini_section_begin(&w, "sigils");
+    /* The sigils dispelled: a section for the player's level, then one for each other level with any. */
+    for (int32_t lv = -1; lv < (int32_t)g->other_level_count; lv++) {
         int32_t ids[BS_SAVE_SIGILS];
+        int n = 0;
         for (uint32_t k = 0; k < g->sigil_gone_count; k++)
-            ids[k] = (int32_t)g->sigils_gone[k];
-        put_ints(&w, "gone", "their BS6 ids", ids, (int)g->sigil_gone_count);
+            if (g->sigil_gone_level[k] == lv)
+                ids[n++] = (int32_t)g->sigils_gone[k];
+        if (!n)
+            continue;
+        bs_ini_section_begin(&w, "sigils");
+        put_level(&w, g, lv);
+        put_ints(&w, "gone", "their BS6 ids", ids, n);
     }
     for (int m = g->have_maps ? 0 : -1; m < (g->have_maps ? BS_SAVED_MAPS : 0); m++) {
         const uint8_t *cells = m < 0 ? g->seen : g->maps[m];
@@ -490,10 +511,25 @@ static void read_save(reader *r, const bs_ini_section *s, bs_saved_game *g)
         else if (!strcmp(e->key, "campaign"))
             str(r, e->value, g->campaign_file, sizeof g->campaign_file);
         else if (!strcmp(e->key, "other_level")) {
-            if (g->other_level_count == BS_SAVED_LEVELS)
+            /* "FILE", or "FILE monsters": its monsters are listed. */
+            char v[48];
+            str(r, e->value, v, sizeof v);
+            char *sp = strchr(v, ' ');
+            bool monsters = false;
+            if (sp) {
+                *sp++ = '\0';
+                while (*sp == ' ')
+                    sp++;
+                monsters = !strcmp(sp, "monsters");
+                if (!monsters)
+                    bad(r, "other_level: '%s' after the file isn't 'monsters'", sp);
+            }
+            if (g->other_level_count == BS_SAVED_LEVELS) {
                 bad(r, "more than %d other levels", BS_SAVED_LEVELS);
-            else
-                str(r, e->value, g->other_levels[g->other_level_count++], sizeof g->other_levels[0]);
+            } else {
+                snprintf(g->other_levels[g->other_level_count], sizeof g->other_levels[0], "%.31s", v);
+                g->other_monsters[g->other_level_count++] = monsters;
+            }
         } else if (!strcmp(e->key, "level_number"))
             g->level_number = (int)num(r, e->value, 1, 99);
         else if (!strcmp(e->key, "clock"))
@@ -747,6 +783,16 @@ static void read_where(reader *r, const char *v, bs_saved_item *it, uint32_t *re
     bad(r, "where: '%s' isn't carried, floor, nowhere, item ID, object ID or monster ID", v);
 }
 
+/* `level`: one of [save]'s other_level, by its file. */
+static int32_t level_of(reader *r, const bs_saved_game *g, const char *v)
+{
+    for (uint32_t q = 0; q < g->other_level_count; q++)
+        if (!strcmp(g->other_levels[q], v))
+            return (int32_t)q;
+    bad(r, "level: '%s' isn't one of [save]'s other_level", v);
+    return -1;
+}
+
 static void read_item(reader *r, const bs_ini_section *s, bs_saved_game *g, bs_saved_item *it, uint32_t *ref_id)
 {
     memset(it, 0, sizeof *it);
@@ -784,14 +830,9 @@ static void read_item(reader *r, const bs_ini_section *s, bs_saved_game *g, bs_s
             it->worn = boolv(r, v);
         else if (!strcmp(k, "secondary"))
             it->secondary = boolv(r, v);
-        else if (!strcmp(k, "level")) {
-            it->level = -1;
-            for (uint32_t q = 0; q < g->other_level_count; q++)
-                if (!strcmp(g->other_levels[q], v))
-                    it->level = (int32_t)q;
-            if (it->level < 0)
-                bad(r, "level: '%s' isn't one of [save]'s other_level", v);
-        } else
+        else if (!strcmp(k, "level"))
+            it->level = level_of(r, g, v);
+        else
             unknown(r, "item");
     }
     if (!have_base && !r->failed) {
@@ -800,9 +841,10 @@ static void read_item(reader *r, const bs_ini_section *s, bs_saved_game *g, bs_s
     }
 }
 
-static void read_monster(reader *r, const bs_ini_section *s, bs_saved_monster *m)
+static void read_monster(reader *r, const bs_ini_section *s, const bs_saved_game *g, bs_saved_monster *m)
 {
     memset(m, 0, sizeof *m);
+    m->level = -1;
     for (uint32_t i = 0; i < s->count && !r->failed; i++) {
         const bs_ini_entry *e = r->at = &s->entries[i];
         const char *k = e->key, *v = e->value;
@@ -836,6 +878,8 @@ static void read_monster(reader *r, const bs_ini_section *s, bs_saved_monster *m
             m->summoned = boolv(r, v);
         else if (!strcmp(k, "ally"))
             m->ally = boolv(r, v);
+        else if (!strcmp(k, "level"))
+            m->level = level_of(r, g, v);
         else
             unknown(r, "monster");
     }
@@ -849,9 +893,10 @@ static bs_saved_kind kind_of(reader *r, const char *v)
     return k < 0 ? BS_SAVED_KIND_OBJECT : (bs_saved_kind)k;
 }
 
-static void read_object(reader *r, const bs_ini_section *s, bs_saved_object *o)
+static void read_object(reader *r, const bs_ini_section *s, const bs_saved_game *g, bs_saved_object *o)
 {
     memset(o, 0, sizeof *o);
+    o->level = -1;
     for (uint32_t i = 0; i < s->count && !r->failed; i++) {
         const bs_ini_entry *e = r->at = &s->entries[i];
         const char *k = e->key, *v = e->value;
@@ -869,14 +914,19 @@ static void read_object(reader *r, const bs_ini_section *s, bs_saved_object *o)
             o->time = u32v(r, v);
         else if (!strcmp(k, "active"))
             o->active = boolv(r, v);
+        else if (!strcmp(k, "gone"))
+            o->gone = boolv(r, v);
+        else if (!strcmp(k, "level"))
+            o->level = level_of(r, g, v);
         else
             unknown(r, "object");
     }
 }
 
-static void read_ctrl(reader *r, const bs_ini_section *s, bs_saved_ctrl *c)
+static void read_ctrl(reader *r, const bs_ini_section *s, const bs_saved_game *g, bs_saved_ctrl *c)
 {
     memset(c, 0, sizeof *c);
+    c->level = -1;
     for (uint32_t i = 0; i < s->count && !r->failed; i++) {
         const bs_ini_entry *e = r->at = &s->entries[i];
         const char *k = e->key, *v = e->value;
@@ -894,6 +944,8 @@ static void read_ctrl(reader *r, const bs_ini_section *s, bs_saved_ctrl *c)
             c->start_ms = u32v(r, v);
         else if (!strcmp(k, "start"))
             ints(r, v, c->start, 3);
+        else if (!strcmp(k, "level"))
+            c->level = level_of(r, g, v);
         else
             unknown(r, "controller");
     }
@@ -1079,14 +1131,18 @@ bs_result bs_game_save_read(const char *text, size_t size, const bs_spell *spell
             read_item(&r, s, g, &g->items[g->item_count], &item_refs[g->item_count]);
             g->item_count++;
         } else if (!strcmp(n, "monster"))
-            read_monster(&r, s, &g->monsters[g->monster_count++]);
+            read_monster(&r, s, g, &g->monsters[g->monster_count++]);
         else if (!strcmp(n, "object"))
-            read_object(&r, s, &g->objects[g->object_count++]);
+            read_object(&r, s, g, &g->objects[g->object_count++]);
         else if (!strcmp(n, "controller"))
-            read_ctrl(&r, s, &g->ctrls[g->ctrl_count++]);
+            read_ctrl(&r, s, g, &g->ctrls[g->ctrl_count++]);
         else if (!strcmp(n, "sigils")) {
+            const char *lv = bs_ini_get(s, "level");
+            int32_t level = lv ? level_of(&r, g, lv) : -1;
             for (uint32_t k = 0; k < s->count && !r.failed; k++) {
                 r.at = &s->entries[k];
+                if (!strcmp(r.at->key, "level"))
+                    continue;
                 if (strcmp(r.at->key, "gone")) {
                     unknown(&r, "sigils");
                     break;
@@ -1100,8 +1156,10 @@ bs_result bs_game_save_read(const char *text, size_t size, const bs_spell *spell
                     }
                     if (g->sigil_gone_count == BS_SAVE_SIGILS)
                         bad(&r, "more than %d sigils", BS_SAVE_SIGILS);
-                    else
+                    else {
+                        g->sigil_gone_level[g->sigil_gone_count] = level;
                         g->sigils_gone[g->sigil_gone_count++] = (uint32_t)id;
+                    }
                     p = end;
                     while (*p == ' ' || *p == '\t')
                         p++;
@@ -1135,8 +1193,11 @@ bs_result bs_game_save_read(const char *text, size_t size, const bs_spell *spell
                 bad(&r, "item %u is in item %u, which isn't there", (unsigned)it->id, (unsigned)want);
             it->ref = k;
         } else if (it->place == BS_SAVED_MONSTER) {
+            /* As containers: the item's level's monster first. */
             uint32_t k = 0;
-            while (k < g->monster_count && g->monsters[k].id != want)
+            while (k < g->monster_count && (g->monsters[k].id != want || g->monsters[k].level != it->level))
+                k++;
+            for (k = k < g->monster_count ? k : 0; k < g->monster_count && g->monsters[k].id != want;)
                 k++;
             if (k == g->monster_count)
                 bad(&r, "item %u is held by monster %u, which isn't there", (unsigned)it->id, (unsigned)want);

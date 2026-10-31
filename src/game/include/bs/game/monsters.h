@@ -168,6 +168,7 @@ typedef enum bs_monster_event_kind {
     BS_MONSTER_GONE,       /* the death image finished: drop the loot here */
     BS_MONSTER_CAST,       /* value: spell | element << 8 | delivery << 16, at the player (paid for) */
     BS_MONSTER_TALK,       /* the greeting starts a conversation */
+    BS_MONSTER_BLEEDS,     /* hurt and still alive: the blood shows at it (0x43886) */
 } bs_monster_event_kind;
 
 typedef struct bs_monster_event {

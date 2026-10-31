@@ -104,6 +104,10 @@ bs_result bs_level_view_load_ex(bs_level_view *v, bs_assets *assets, const bs_vf
     bs_result r = bs_assets_read(assets, file, &v->arena, &data, &size);
     if (r == BS_OK)
         r = bs_bs6_parse(data, size, &v->arena, &v->level);
+    /* Without the other kind of game's entities (STRU 122), as the game loads it. Interiors aren't in
+     * LEVELS.TXT; only the campaign has them. */
+    if (r == BS_OK)
+        bs_bs6_keep_game(&v->level, info && bs_level_game_type(info) != BS_GAME_CAMPAIGN);
     /* Objects with controllers or links get their own geometry so they can move and be used, and
      * so do items, which can be taken away. */
     uint32_t nobj = v->level.object_count, extras = 1 + extra_count;

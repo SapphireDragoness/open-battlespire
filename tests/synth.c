@@ -1147,6 +1147,41 @@ static void le_code(w *b, const char *code)
     le_chunk_end(b, st);
 }
 
+size_t synth_bs6_games(uint8_t *out, size_t cap)
+{
+    w b = { out, 0, cap, 1 };
+    size_t gnrl = le_chunk_begin(&b, "GNRL");
+    size_t objs = le_chunk_begin(&b, "OBJS");
+    put(&b, "LFIL", 4);
+    u32(&b, 260);
+    put(&b, "box", 3);
+    fill(&b, 0, 257);
+    static const int32_t single[] = { 0 }, multi[] = { 1 }, book[] = { 999 }, text[] = { 1099 };
+    size_t o = le_object_begin(&b, 50, 0); /* both */
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 51, 100); /* the single player scroll */
+    le_stru(&b, 107, book, 1);
+    le_stru(&b, 122, single, 1);
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 52, 200); /* the multiplayer one, with a controller */
+    le_ctrl(&b, 16, NULL, 0, NULL);
+    le_stru(&b, 122, multi, 1);
+    le_stru(&b, 114, text, 1);
+    le_chunk_end(&b, o);
+    o = le_object_begin(&b, 53, 300);
+    le_chunk_end(&b, o);
+    le_chunk_end(&b, objs);
+    size_t flas = le_chunk_begin(&b, "FLAS");
+    size_t f = le_flat_begin(&b, 60, "monster1", 0, 0);
+    le_stru(&b, 122, multi, 1);
+    le_chunk_end(&b, f);
+    f = le_flat_begin(&b, 61, "monster1", 300, 0);
+    le_chunk_end(&b, f);
+    le_chunk_end(&b, flas);
+    le_chunk_end(&b, gnrl);
+    return done(&b);
+}
+
 size_t synth_bs6_monsters(uint8_t *out, size_t cap)
 {
     w b = { out, 0, cap, 1 };

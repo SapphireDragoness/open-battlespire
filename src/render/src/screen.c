@@ -114,3 +114,14 @@ bool bs_screen_to_image(const bs_screen *s, int width, int height, float wx, flo
     *iy = (int)(fy * (float)s->height);
     return true;
 }
+
+void bs_screen_keep_red(int width, int height)
+{
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, width, height);
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_FALSE, GL_TRUE, GL_TRUE, GL_FALSE);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+}

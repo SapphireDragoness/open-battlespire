@@ -495,6 +495,24 @@ static void test_balloon(void)
     BS_CHECK(ev.ride_blocked && p.pos[1] > -4 && p.pos[1] <= 0);
 }
 
+/* Floors that burn (0x41817): the seven textures, and 50 ms steps of 2. */
+static void test_burning_floors(void)
+{
+    BS_CHECK(bs_floor_burns("lava00") && bs_floor_burns("LAVA01") && bs_floor_burns("Mud00") &&
+             bs_floor_burns("fpit02") && bs_floor_burns("poop00") && bs_floor_burns("gold00") &&
+             bs_floor_burns("smth05"));
+    BS_CHECK(!bs_floor_burns("lava02") && !bs_floor_burns("") && !bs_floor_burns(NULL) && !bs_floor_burns("lava"));
+    uint32_t carry = 0;
+    BS_CHECK_EQ_INT(bs_floor_burn(&carry, 16), 0);
+    BS_CHECK_EQ_INT(bs_floor_burn(&carry, 16), 0);
+    BS_CHECK_EQ_INT(bs_floor_burn(&carry, 16), 0);
+    BS_CHECK_EQ_INT(bs_floor_burn(&carry, 16), 2); /* 64 ms: one step, 14 carried */
+    BS_CHECK_EQ_INT(carry, 14);
+    carry = 0;
+    BS_CHECK_EQ_INT(bs_floor_burn(&carry, 1000), 40); /* 40 a second */
+    BS_CHECK_EQ_INT(carry, 0);
+}
+
 int main(void)
 {
     bs_arena_init(&arena, 0);
@@ -519,5 +537,6 @@ int main(void)
     BS_RUN(test_boat);
     BS_RUN(test_balloon);
     bs_arena_free(&arena);
+    BS_RUN(test_burning_floors);
     return BS_TEST_RESULT();
 }

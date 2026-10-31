@@ -235,22 +235,23 @@ static const bs_wav *effect(bs_level_audio *la, int32_t id)
     return la->effects_cache[i].ok ? &la->effects_cache[i].wav : NULL;
 }
 
-void bs_level_audio_play_at(bs_level_audio *la, int32_t id, uint32_t source, const float pos[3],
-                            const float listener[3], float yaw)
+bs_voice bs_level_audio_play_at(bs_level_audio *la, int32_t id, uint32_t source, const float pos[3],
+                                const float listener[3], float yaw)
 {
     if (!la->audio)
-        return;
+        return 0;
     const bs_wav *w = effect(la, id);
     if (!w)
-        return;
+        return 0;
     bs_sound_place p = {1.0f, 0.0f};
     if (pos && (bs_sound_distance(listener, pos) >= BS_SOUND_CUTOFF_NEAR ||
                 !bs_sound_place_at(listener, game_yaw(yaw), pos, max_distance(la), false, &p)))
-        return;
+        return 0;
     bs_pcm_format f = {w->bits, w->channels, w->rate};
     bs_voice v = bs_audio_play(la->audio, w->samples, w->sample_bytes, f, p.gain * la->effects_gain, p.pan, false);
     if (pos)
         track(la, v, source, pos);
+    return v;
 }
 
 void bs_level_audio_update(bs_level_audio *la, const float pos[3], float yaw, double dt)

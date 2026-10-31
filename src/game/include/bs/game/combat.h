@@ -82,6 +82,9 @@ typedef struct bs_swing {
 } bs_swing;
 bool bs_swing_from_motion(int32_t dx, int32_t dy, bs_swing *out);
 
+/* The swing of one of the 16 directions (0..15, as bs_swing_from_motion finds them). */
+bs_swing bs_swing_of_direction(int direction);
+
 /* The push a blow gives (0x439B8): force (capped at 400) against mass. Returns the speed in units per
  * 50 ms tick and its duration in ms, or 0 for none. */
 int32_t bs_knockback(int32_t force, int32_t mass, int32_t distance, uint32_t *duration_ms);

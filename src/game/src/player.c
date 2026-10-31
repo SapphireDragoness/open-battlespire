@@ -3,6 +3,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "bs/core/fs.h"
+
 /* RE references are GAME.EXE addresses; see docs/re/README.md, "Player movement and collision". */
 
 /* The body probe (0xED6EA): sphere heights above the feet and radii. */
@@ -497,4 +499,22 @@ bs_cursor_steer bs_cursor_steer_of(int zone, float amount, int32_t speed, int32_
     default: break;
     }
     return s;
+}
+
+/* ---- floors that burn ---- */
+
+bool bs_floor_burns(const char *texture)
+{
+    static const char *const names[] = {"fpit02", "poop00", "lava00", "gold00", "mud00", "smth05", "lava01"};
+    for (size_t i = 0; texture && i < sizeof names / sizeof names[0]; i++)
+        if (bs_strcasecmp(texture, names[i]) == 0)
+            return true;
+    return false;
+}
+
+int32_t bs_floor_burn(uint32_t *carry_ms, uint32_t dt_ms)
+{
+    uint32_t t = *carry_ms + dt_ms, steps = t / BS_BURN_STEP_MS;
+    *carry_ms = t % BS_BURN_STEP_MS;
+    return (int32_t)steps * (int32_t)(BS_BURN_STEP_MS * BS_BURN_PER_SECOND / 1000);
 }

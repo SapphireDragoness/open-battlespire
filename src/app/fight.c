@@ -16,7 +16,6 @@
 #define MONSTER_EYE 50.0f        /* as in monsters.c (inferred) */
 #define PUNCH_SOUND 0x1A2        /* a swing with bare hands (0x494FB) */
 #define PUNCH_STRIKE_FRAME 5     /* the punch's blow lands at this frame (0x2A892: frame > 4) */
-#define PAIN_SOUND 0x1A5         /* + 0 or 1; + 2 for a female character (0x43819) */
 /* A swing's sound by the weapon in hand, -1 none (0xEF840). */
 static const int16_t swing_sound[BS_ITEM_LAST_WEAPON + 1] = {418, 418, 416, 416, 416, 415, 415, 415,
                                                              -1,  -1,  -1,  419, -1,  419, 419};
@@ -118,6 +117,8 @@ static void load_spell_images(fight *f, const fight_env *env)
         f->hands[e] = bs_assets_image(env->assets, name);
     }
     f->sparkle = bs_assets_image(env->assets, "twinkle.bsi");
+    /* blod90.bsi, sparkles, instead when C:\SPIRE.GRD exists (0x112EF): a gore lock, not offered here. */
+    f->blood = bs_assets_image(env->assets, "blod00.bsi");
     f->punch = bs_assets_image(env->assets, "punch0.bsi");
     for (int i = 0; i < 27; i++) {
         snprintf(name, sizeof name, "symb%02d.bsi", i);
@@ -560,6 +561,13 @@ void fight_attack_pressed(fight *f, const fight_env *env)
     bs_fighter pf;
     uint32_t wi;
     player_fighter(env, &pf, &wi, NULL);
+    if (pf.armed && env->click_swing && !f->hand.bow && bs_hand_can_swing(&f->hand)) {
+        /* Weapon Swing "Click" (an addition): a press swings at once, in one of the mouse's 16 directions at
+         * random, so chops, slashes and thrusts come mixed. */
+        bs_swing s = bs_swing_of_direction((int)bs_rng_range(env->rng, 0, 15));
+        start_swing(f, env, &s, wi);
+        return;
+    }
     if (pf.armed || f->punching || f->player_died)
         return;
     /* A punch: the last swing's factors (0x41265 keeps 0x16BFC8 / 0x16BFD0). */
@@ -775,6 +783,30 @@ static void magic_events(fight *f, const fight_env *env, const bs_magic_events *
 }
 
 /* The monsters' events; spells they cast go off here. */
+/* Blood where a monster was hurt and lives on (0x43886 -> 0x1D8DF): blod00.bsi played once, as an object of
+ * its own 40 above the monster's feet and 10 nearer the player. The image stands on that point (inferred). */
+static void add_blood(fight *f, const fight_env *env, const bs_monster *m)
+{
+    if (!f->blood)
+        return;
+    int k = 0;
+    for (int i = 0; i < FIGHT_BLOOD; i++) {
+        if (!f->blood_at[i].live) {
+            k = i;
+            break;
+        }
+        if (f->blood_at[i].start < f->blood_at[k].start)
+            k = i; /* all in use: the oldest goes */
+    }
+    float dx = env->player->pos[0] - m->body.pos[0], dz = env->player->pos[2] - m->body.pos[2];
+    float d = sqrtf(dx * dx + dz * dz);
+    f->blood_at[k].pos[0] = m->body.pos[0] + (d > 0 ? dx / d * 10.0f : 0);
+    f->blood_at[k].pos[1] = m->body.pos[1] - 40.0f;
+    f->blood_at[k].pos[2] = m->body.pos[2] + (d > 0 ? dz / d * 10.0f : 0);
+    f->blood_at[k].start = env->now_ms;
+    f->blood_at[k].live = true;
+}
+
 static void monster_events(fight *f, const fight_env *env, bs_monster_events *ev, bool *dropped)
 {
     bs_monster_world mw;
@@ -792,6 +824,9 @@ static void monster_events(fight *f, const fight_env *env, bs_monster_events *ev
             break;
         case BS_MONSTER_TALK:
             f->talk_to = e.monster;
+            break;
+        case BS_MONSTER_BLEEDS:
+            add_blood(f, env, &f->monsters.list[e.monster]);
             break;
         case BS_MONSTER_GREET:
             message_with(env, (uint32_t)e.value, f->tables.creatures[f->monsters.list[e.monster].type].name);
@@ -834,7 +869,7 @@ bool fight_update(fight *f, const fight_env *env, bool attack_held, uint32_t dt_
     if (wield != f->hand.weapon)
         bs_hand_equip(&f->hand, wield, env->now_ms, 0);
     /* The swing: the last eight frames' mouse motion (0x21476) while the button is held (0x41296). */
-    bool ready = pf.armed ? bs_hand_can_swing(&f->hand) && !f->hand.bow : !f->punching;
+    bool ready = pf.armed ? bs_hand_can_swing(&f->hand) && !f->hand.bow && !env->click_swing : !f->punching;
     if (attack_held && ready && !f->player_died) {
         float sx = 0, sy = 0;
         for (int k = 0; k < 8; k++) {
@@ -1142,7 +1177,7 @@ uint32_t fight_models(const fight *f, const fight_env *env, bs_scene_xform *out,
 
 void fight_draw(fight *f, const float eye[3], uint32_t now_ms, bs_level_renderer *r)
 {
-    uint32_t n = 0, want = f->monsters.count + BS_MAGIC_MISSILES + BS_MAGIC_BURSTS;
+    uint32_t n = 0, want = f->monsters.count + BS_MAGIC_MISSILES + BS_MAGIC_BURSTS + FIGHT_BLOOD;
     if (want > f->sprite_cap) {
         bs_level_sprite *s = realloc(f->sprites, sizeof *s * want);
         if (!s)
@@ -1190,6 +1225,18 @@ void fight_draw(fight *f, const float eye[3], uint32_t now_ms, bs_level_renderer
         }
         float h = (float)img->height * (img->bhdr[11] > 0 ? (float)img->bhdr[11] / 256.0f : 1.0f);
         f->sprites[n++] = (bs_level_sprite){img, frame, {b->pos[0], b->pos[1] + h * 0.5f, b->pos[2]}, false};
+    }
+    for (uint32_t i = 0; i < FIGHT_BLOOD; i++) {
+        if (!f->blood_at[i].live)
+            continue;
+        bool done;
+        uint32_t frame = frame_at(f->blood, now_ms - f->blood_at[i].start, &done);
+        if (done) {
+            f->blood_at[i].live = false;
+            continue;
+        }
+        f->sprites[n++] = (bs_level_sprite){f->blood, frame, {f->blood_at[i].pos[0], f->blood_at[i].pos[1],
+                                                              f->blood_at[i].pos[2]}, false};
     }
     if (bs_level_renderer_set_sprites(r, f->sprites, n) != BS_OK)
         BS_WARN("cannot draw the monsters");

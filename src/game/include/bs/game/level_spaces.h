@@ -6,6 +6,7 @@
 #include "bs/core/arena.h"
 #include "bs/core/result.h"
 #include "bs/formats/bs6.h"
+#include "bs/game/level_logic.h"
 
 /*
  * A campaign level's spaces as the original keeps them (docs/formats/save.md, "Interiors"): the game
@@ -41,6 +42,8 @@ typedef struct bs_level_spaces {
     bs_level_space spaces[BS_LEVEL_SPACES_MAX];
     uint32_t count;
     uint32_t *chain_lengths;          /* every space's chains' controller counts, in the save's order */
+    uint32_t *chain_ids;              /* each chain's entity: its id in its space's own file ... */
+    uint8_t *chain_kinds;             /* ... and its kind (bs_logic_kind: object, flat or light) */
     uint32_t chain_count;
 } bs_level_spaces;
 

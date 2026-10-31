@@ -158,4 +158,24 @@ int32_t bs_bs6_record_i32(const bs_bs6_record *r, uint32_t i);
 /* The first property with this id, or NULL. */
 const bs_bs6_record *bs_bs6_logic_prop(const bs_bs6_logic *l, uint32_t id);
 
+/*
+ * STRU 122: which kind of game an entity is in. 0 single player only, 1
+ * multiplayer only; entities without it are in both. The levels have pairs:
+ * a takeable scroll with a book text for single player beside a fixed one
+ * with the same text from TEXT.RSC for multiplayer, and multiplayer's
+ * sigils, sacks of amulets and monsters guarding them. The game deletes the
+ * other kind's entities as it loads the level (GAME.EXE 0x246F5, 0x2548C,
+ * 0x25A90; the multiplayer flag is 0xF219F, set once the network is up).
+ * Their controllers keep their places in a save's controller table.
+ */
+#define BS_BS6_PROP_GAME 122u
+
+/* An entity's STRU 122: 0 single player, 1 multiplayer, -1 both. */
+int bs_bs6_entity_game(const bs_bs6_chunk *entity);
+
+/* Removes the objects, flats and lights of the other kind of game from a parsed level, keeping the rest
+ * in order. Returns how many were removed. Ids and controller chains (level_spaces) count every entity,
+ * so they need the level as parsed. */
+uint32_t bs_bs6_keep_game(bs_bs6_level *level, bool multiplayer);
+
 #endif

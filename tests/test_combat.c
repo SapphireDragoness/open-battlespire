@@ -182,6 +182,14 @@ static void test_swings(void)
     BS_CHECK(bs_swing_from_motion(-150, 0, &s));
     BS_CHECK_EQ_INT(s.direction, 11);
     BS_CHECK_EQ_INT(s.damage_mult, 4);
+    /* By direction (Weapon Swing "Click"): the same as the motion's. */
+    for (int d = 0; d < 16; d++) {
+        bs_swing t = bs_swing_of_direction(d);
+        BS_CHECK_EQ_INT(t.direction, d);
+    }
+    bs_swing t = bs_swing_of_direction(11);
+    BS_CHECK(t.animation == s.animation && t.skill_mult == s.skill_mult && t.damage_mult == s.damage_mult);
+    BS_CHECK_EQ_INT(bs_swing_of_direction(16).direction, 0);
 }
 
 static void test_knockback(void)

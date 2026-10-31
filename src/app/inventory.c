@@ -151,9 +151,14 @@ static bool shown(const inventory *inv, const inventory_env *env, uint32_t i)
 static uint32_t visible(const inventory *inv, const inventory_env *env, int list, uint32_t *out)
 {
     static uint32_t all[LIST_MAX];
-    uint32_t n = bs_items_list(env->items, top(inv, list), all, LIST_MAX), k = 0;
+    bs_item_place at = top(inv, list);
+    uint32_t n = bs_items_list(env->items, at, all, LIST_MAX), k = 0;
     for (uint32_t i = 0; i < n && i < LIST_MAX; i++) {
         const bs_world_item *w = &env->items->items[all[i]];
+        /* The floor: the cell's items near the player (0x4EF7B), and the one clicked. */
+        if (at.where == BS_ITEM_FLOOR && env->near_pos && all[i] != env->clicked &&
+            bs_game_distance(w->pos, env->near_pos) > BS_ITEM_FLOOR_NEAR)
+            continue;
         /* Worn items and the secondary weapon are on the doll instead (0x4ED43). */
         if (all[i] != inv->held && !w->equipped && !w->secondary && shown(inv, env, all[i]))
             out[k++] = all[i];

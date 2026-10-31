@@ -18,15 +18,15 @@
  *     [spell]     one for each spell known, with the spell book's choices
  *     [effect]    one for each timed spell on the player
  *     [item]      one for each item, wherever it is
- *     [monster]   one for each monster alive
- *     [object]    the level's objects that moved, locks, used gems
+ *     [monster]   one for each monster alive (in the levels whose monsters are kept)
+ *     [object]    the level's objects that moved, locks, used gems, speakers gone (and the other levels')
  *     [controller], [sigils], [automap], [dialogue], [variables], [locals]
  *
  * Numbers are decimal; flags may be hex (0x...). Unknown sections or keys are errors, so a typo doesn't go
  * unnoticed.
  */
 
-#define BS_GAME_SAVE_VERSION 1
+#define BS_GAME_SAVE_VERSION 2
 #define BS_GAME_SAVE_ERROR 160
 
 /* Names for comments and for reading names back; any may be NULL. */

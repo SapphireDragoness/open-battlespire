@@ -440,6 +440,49 @@ static void test_all_levels(void)
     bs_assets_close(assets);
 }
 
+/* STRU 122: by the dead battlemage at level 1's start lie two scrolls to take in single player (297, 441)
+ * and two with the same texts for multiplayer (298, 440), which the game deletes in single player. */
+static void test_level1_game_kinds(void)
+{
+    bs_assets *assets;
+    BS_CHECK_EQ_INT(bs_assets_open(&vfs, &assets), BS_OK);
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    uint8_t *data;
+    size_t n;
+    bs_bs6_level lvl;
+    BS_CHECK_EQ_INT(bs_assets_read(assets, "l1.bs6", &a, &data, &n), BS_OK);
+    BS_CHECK_EQ_INT(bs_bs6_parse(data, n, &a, &lvl), BS_OK);
+    uint32_t all = lvl.object_count;
+    BS_CHECK_EQ_INT(bs_bs6_keep_game(&lvl, false), 15);
+    BS_CHECK_EQ_INT(lvl.object_count, all - 15);
+    uint32_t found = 0;
+    for (uint32_t i = 0; i < lvl.object_count; i++) {
+        const bs_bs6_object *o = &lvl.objects[i];
+        if (strcmp(lvl.model_names[o->model], "scroll") == 0 && abs(o->pos[0] - 613) < 100 &&
+            abs(o->pos[2] + 45) < 100) {
+            BS_CHECK(o->id == 297 || o->id == 441);
+            found++;
+        }
+    }
+    BS_CHECK_EQ_INT(found, 2);
+
+    /* Level 1's lava burns (0x41817): its faces have one of the burning textures. */
+    bs_scene sc;
+    BS_CHECK_EQ_INT(bs_scene_build(assets, &lvl, &a, &sc), BS_OK);
+    uint32_t burning = 0;
+    for (uint32_t i = 0; i < sc.batch_count; i++)
+        if (bs_floor_burns(sc.materials[sc.batches[i].material].name)) {
+            if (!burning)
+                fprintf(stderr, "  l1 burning texture %s\n", sc.materials[sc.batches[i].material].name);
+            burning += sc.batches[i].count / 3;
+        }
+    fprintf(stderr, "  l1: %u burning triangles\n", burning);
+    BS_CHECK(burning > 0);
+    bs_assets_close(assets);
+    bs_arena_free(&a);
+}
+
 /*
  * Level 1 built with its interactive objects as separate, movable parts
  * matches the all-static build: same triangles, and rays hit at the same
@@ -1067,6 +1110,14 @@ static bool has_object(const bs_bs6_level *lv, uint32_t id)
     return false;
 }
 
+static bool has_flat(const bs_bs6_level *lv, uint32_t id)
+{
+    for (uint32_t k = 0; lv && k < lv->flat_count; k++)
+        if (lv->flats[k].id == id)
+            return true;
+    return false;
+}
+
 /* Saved games in the install's SAVE0-9, if any (the user's own): every file reads; the player is there;
  * parents resolve to the level or one of its interiors; the controllers of the level and its interiors take
  * up the rest of the tree exactly, in our chain order; imported, every item is somewhere its level has. */
@@ -1159,8 +1210,8 @@ static void test_saves(void)
         free(again);
         bs_save_edit_free(&ed);
         /* Imported: every item somewhere its level has, every saved model one of the level's, the player on
-         * a cell of the automap that was seen (the grid row by row, as the engine keeps it). The name may be
-         * blank, and the player may carry nothing. */
+         * a cell of the automap that was seen (the grid row by row, as the engine keeps it), every timed effect
+         * a spell. The name may be blank, and the player may carry nothing. */
         static bs_saved_game sg;
         BS_CHECK_EQ_INT(bs_save_import(&t, &v, &sp, spells, &a, &sg), BS_OK);
         BS_CHECK(sg.character.health_max > 0 && sg.character.spells_known != 0);
@@ -1178,12 +1229,32 @@ static void test_saves(void)
             BS_CHECK(in != NULL);
             BS_CHECK(it->place != BS_SAVED_IN_OBJECT || has_object(in, it->ref));
             BS_CHECK(it->place != BS_SAVED_IN_ITEM || (it->ref < sg.item_count && sg.items[it->ref].level == it->level));
-            BS_CHECK(it->place != BS_SAVED_MONSTER || (it->ref < sg.monster_count && it->level == -1));
+            BS_CHECK(it->place != BS_SAVED_MONSTER ||
+                     (it->ref < sg.monster_count && sg.monsters[it->ref].level == it->level));
         }
-        for (uint32_t i = 0; i < sg.object_count; i++)
-            BS_CHECK(has_object(lvl, sg.objects[i].id));
+        /* Every other space is kept, with its monsters; objects and controllers are each level's own. */
+        BS_CHECK_EQ_INT(sg.other_level_count, sp.count - 1);
+        BS_CHECK(sg.have_ctrls);
+        for (uint32_t i = 0; i < sg.object_count; i++) {
+            const bs_saved_object *o = &sg.objects[i];
+            const bs_bs6_level *in = o->level < 0 ? lvl : space_level(&sp, levels, sg.other_levels[o->level]);
+            BS_CHECK(in && (o->kind == BS_SAVED_KIND_FLAT ? has_flat(in, o->id) : has_object(in, o->id)));
+        }
+        for (uint32_t i = 0; i < sg.ctrl_count; i++) {
+            const bs_saved_ctrl *c = &sg.ctrls[i];
+            const bs_bs6_level *in = c->level < 0 ? lvl : space_level(&sp, levels, sg.other_levels[c->level]);
+            BS_CHECK(in && (c->kind == BS_SAVED_KIND_FLAT     ? has_flat(in, c->object)
+                            : c->kind == BS_SAVED_KIND_OBJECT ? has_object(in, c->object)
+                                                              : true));
+        }
         for (uint32_t i = 0; i < sg.monster_count; i++)
             BS_CHECK(sg.monsters[i].type < BS_CREATURE_COUNT && sg.monsters[i].health > 0);
+        uint32_t effects = 0;
+        for (uint32_t i = 0; i < t.count; i++)
+            effects += t.records[i].type == BS_SAVE_EFFECT && t.records[i].parent_index == player;
+        for (uint32_t k = 0; k < BS_EFFECTS; k++)
+            effects -= sg.character.effects[k].spell != 0;
+        BS_CHECK_EQ_INT(effects, 0);
         /* As our text and back: the same game. */
         {
             char *text;
@@ -1431,6 +1502,7 @@ int main(void)
     BS_RUN(test_all_models);
     BS_RUN(test_all_levels);
     BS_RUN(test_separate_objects);
+    BS_RUN(test_level1_game_kinds);
     BS_RUN(test_player_level1);
     BS_RUN(test_level1_generator);
     BS_RUN(test_all_nodes);

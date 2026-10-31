@@ -322,6 +322,7 @@ bool bs_monster_hurt(bs_monsters *ms, uint32_t i, const bs_monster_world *w, int
         return true;
     }
     emit(ev, BS_MONSTER_SOUND, i, w->tables->sounds[m->type][BS_CREATURE_SOUND_HURT]);
+    emit(ev, BS_MONSTER_BLEEDS, i, 0);
     /* The push (0x439B8): force 30 x damage, distance 3 x damage, both times the blow's force. */
     uint32_t ms_len;
     int32_t v = bs_knockback(damage * 30 * force, c->unk_7c, damage * 3 * force, &ms_len);

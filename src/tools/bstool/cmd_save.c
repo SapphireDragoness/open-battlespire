@@ -65,6 +65,7 @@ static const char *type_name(uint8_t t)
     case BS_SAVE_SPELL: return "spell";
     case BS_SAVE_MONSTER: return "monster";
     case BS_SAVE_OPTIONS: return "options";
+    case BS_SAVE_FLAT: return "flat";
     case BS_SAVE_AUTOMAP: return "automap";
     case BS_SAVE_EFFECT: return "effect";
     default: return "?";

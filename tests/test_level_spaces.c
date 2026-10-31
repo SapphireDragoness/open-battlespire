@@ -74,6 +74,9 @@ static void test_spaces(void)
     BS_CHECK_EQ_INT(s.chain_lengths[1], 1);
     BS_CHECK_EQ_INT(s.chain_lengths[2], 3);
     BS_CHECK_EQ_INT(s.chain_lengths[3], 1);
+    /* Each chain's entity, by its own file's id: each level's last object. */
+    BS_CHECK(s.chain_ids[0] == 20 && s.chain_ids[1] == 9 && s.chain_ids[2] == 15 && s.chain_ids[3] == 12);
+    BS_CHECK_EQ_INT(s.chain_kinds[2], BS_LOGIC_OBJECT);
     for (uint32_t k = 0; k < 4; k++) {
         BS_CHECK_EQ_INT(s.spaces[k].first_chain, k);
         BS_CHECK_EQ_INT(s.spaces[k].chain_count, 1);

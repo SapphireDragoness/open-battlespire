@@ -555,6 +555,18 @@ static bool same_place(bs_item_place a, bs_item_place b)
 }
 
 /* Insertion sort by seq: lists are short. */
+int32_t bs_game_distance(const float a[3], const float b[3])
+{
+    int32_t dx = (int32_t)a[0] - (int32_t)b[0], dz = (int32_t)a[2] - (int32_t)b[2];
+    dx = dx < 0 ? -dx : dx;
+    dz = dz < 0 ? -dz : dz;
+    int32_t across = dx + dz - (dx < dz ? dx : dz) / 2;
+    int32_t dy = (int32_t)(a[1] - b[1]);
+    dy = dy < 0 ? -dy : dy;
+    int32_t hi = across > dy ? across : dy, lo = across > dy ? dy : across;
+    return hi + lo / 4;
+}
+
 uint32_t bs_items_list(const bs_items *it, bs_item_place place, uint32_t *out, uint32_t max)
 {
     uint32_t n = 0;

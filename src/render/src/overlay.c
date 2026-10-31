@@ -134,6 +134,14 @@ static void put(bs_overlay *o, int x, int y, uint32_t rgba)
     p[3] = (uint8_t)rgba;
 }
 
+uint32_t bs_overlay_get(const bs_overlay *o, int x, int y)
+{
+    if (x < 0 || y < 0 || x >= BS_OVERLAY_WIDTH || y >= BS_OVERLAY_HEIGHT)
+        return 0;
+    const uint8_t *p = o->pixels + ((size_t)y * BS_OVERLAY_WIDTH + (size_t)x) * 4;
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
 void bs_overlay_fill(bs_overlay *o, int x, int y, int w, int h, uint32_t rgba)
 {
     for (int j = y; j < y + h; j++)

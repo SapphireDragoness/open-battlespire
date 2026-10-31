@@ -128,12 +128,15 @@ bool bs_swing_from_motion(int32_t dx, int32_t dy, bs_swing *out)
     int32_t a = (int32_t)(acosf((float)dy / len) * 1024.0f / 3.14f);
     if (dx <= 0)
         a = 0x7FF - a;
-    int d = (a >> 7) & 15;
-    out->direction = d;
-    out->skill_mult = swing_skill[d];
-    out->damage_mult = swing_damage[d];
-    out->animation = swing_animation[d];
+    *out = bs_swing_of_direction((a >> 7) & 15);
     return true;
+}
+
+bs_swing bs_swing_of_direction(int direction)
+{
+    int d = direction & 15;
+    return (bs_swing){.direction = d, .skill_mult = swing_skill[d], .damage_mult = swing_damage[d],
+                      .animation = swing_animation[d]};
 }
 
 int32_t bs_knockback(int32_t force, int32_t mass, int32_t distance, uint32_t *duration_ms)

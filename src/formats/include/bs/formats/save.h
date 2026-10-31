@@ -45,6 +45,7 @@ enum {
     BS_SAVE_SPELL = 9,
     BS_SAVE_MONSTER = 18,
     BS_SAVE_OPTIONS = 23,
+    BS_SAVE_FLAT = 33,                /* a level's flat: saved with controllers, or gone (+0x14 bit 2) */
     BS_SAVE_AUTOMAP = 51,
     BS_SAVE_EFFECT = 66,
 };

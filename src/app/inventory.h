@@ -40,6 +40,9 @@ typedef struct inventory_env {
     const bs_item_db *db;
     int32_t strength;
     float drop_pos[3];               /* where dropped items land: by the player's feet */
+    const float *near_pos;           /* the player's feet: the floor list shows items near them only, or NULL */
+    uint32_t clicked;                /* an item the floor list shows however far (clicked to open it), or
+                                        UINT32_MAX */
     bs_level_renderer *renderer;
     uint32_t model_first;            /* renderer object of the first item model (see inventory_models) */
     const float *model_radius;       /* per item model */

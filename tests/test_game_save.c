@@ -26,6 +26,7 @@ static void make(bs_saved_game *g, bs_arena *a)
     snprintf(g->campaign_file, sizeof g->campaign_file, "l5.bs6");
     g->other_level_count = 1;
     snprintf(g->other_levels[0], sizeof g->other_levels[0], "l5.bs6");
+    g->other_monsters[0] = true; /* l5's monsters are listed */
     g->level_number = 5;
     g->clock = 546885;
     g->captive_at = 547000;
@@ -86,24 +87,32 @@ static void make(bs_saved_game *g, bs_arena *a)
                                   .id = 81505, .place = BS_SAVED_IN_ITEM, .ref = 1, .level = -1};
     g->items[3] = (bs_saved_item){.item = {.base = 15, .number = 7, .quantity = 1, .condition = 10, .condition_max = 10},
                                   .id = 305, .place = BS_SAVED_FLOOR, .pos = {3663.0f, -2.0f, -32.0f}, .level = 0};
-    g->monster_count = 1;
-    g->monsters = BS_ARENA_ARRAY(a, bs_saved_monster, 1);
+    /* The level's, then l5's. */
+    g->monster_count = 2;
+    g->monsters = BS_ARENA_ARRAY(a, bs_saved_monster, 2);
     g->monsters[0] = (bs_saved_monster){.id = 577, .type = 2, .pos = {-3648, 177, 1920}, .angle = 1537,
                                         .attributes = {65, 50, 70, 45, 50, 35, 50, 45}, .health = 100, .health_max = 100,
                                         .spell_points = 800, .spell_points_max = 800, .skill = 65, .flags = 0x80,
-                                        .state = 13, .greeted = true};
-    g->object_count = 1;
-    g->objects = BS_ARENA_ARRAY(a, bs_saved_object, 1);
+                                        .state = 13, .greeted = true, .level = -1};
+    g->monsters[1] = (bs_saved_monster){.id = 600, .type = 1, .health = 30, .health_max = 50, .level = 0};
+    g->object_count = 2;
+    g->objects = BS_ARENA_ARRAY(a, bs_saved_object, 2);
     g->objects[0] = (bs_saved_object){.id = 51, .kind = BS_SAVED_KIND_FLAT, .pos = {1784, -47, 3232},
-                                      .angles = {0, 300, 0}, .flags = BS_SAVED_OBJECT_LOCKED, .time = 600000, .active = true};
-    g->ctrl_count = 1;
+                                      .angles = {0, 300, 0}, .flags = BS_SAVED_OBJECT_LOCKED, .time = 600000, .active = true,
+                                      .gone = true, .level = -1};
+    g->objects[1] = (bs_saved_object){.id = 93, .kind = BS_SAVED_KIND_FLAT, .gone = true, .level = 0};
+    g->ctrl_count = 2;
     g->have_ctrls = true;
-    g->ctrls = BS_ARENA_ARRAY(a, bs_saved_ctrl, 1);
+    g->ctrls = BS_ARENA_ARRAY(a, bs_saved_ctrl, 2);
     g->ctrls[0] = (bs_saved_ctrl){.object = 51, .kind = BS_SAVED_KIND_FLAT, .index = 1, .reversed = true,
-                                  .running = true, .start_ms = 540000, .start = {1, -2, 3}};
-    g->sigil_gone_count = 2;
+                                  .running = true, .start_ms = 540000, .start = {1, -2, 3}, .level = -1};
+    g->ctrls[1] = (bs_saved_ctrl){.object = 12, .reversed = true, .level = 0};
+    g->sigil_gone_count = 3;
     g->sigils_gone[0] = 296;
     g->sigils_gone[1] = 300;
+    g->sigils_gone[2] = 299;
+    g->sigil_gone_level[0] = g->sigil_gone_level[1] = -1;
+    g->sigil_gone_level[2] = 0;
     g->have_maps = true;
     g->maps[0][41] = 1;
     g->maps[0][0] = 1; /* a row starting with a seen cell isn't a comment */
@@ -172,11 +181,17 @@ static void test_round_trip(void)
         BS_CHECK_EQ_INT(h.items[i].level, g.items[i].level);
     }
     BS_CHECK(h.items[3].pos[0] == 3663.0f);
-    BS_CHECK_EQ_INT(h.monster_count, 1);
-    BS_CHECK(memcmp(&h.monsters[0], &g.monsters[0], sizeof(bs_saved_monster)) == 0);
-    BS_CHECK(memcmp(&h.objects[0], &g.objects[0], sizeof(bs_saved_object)) == 0);
-    BS_CHECK(h.have_ctrls && h.ctrl_count == 1 && memcmp(&h.ctrls[0], &g.ctrls[0], sizeof(bs_saved_ctrl)) == 0);
-    BS_CHECK(h.sigil_gone_count == 2 && h.sigils_gone[1] == 300);
+    BS_CHECK(h.other_monsters[0]);
+    BS_CHECK_EQ_INT(h.monster_count, 2);
+    BS_CHECK_EQ_INT(h.object_count, 2);
+    for (uint32_t k = 0; k < 2; k++) {
+        BS_CHECK(memcmp(&h.monsters[k], &g.monsters[k], sizeof(bs_saved_monster)) == 0);
+        BS_CHECK(memcmp(&h.objects[k], &g.objects[k], sizeof(bs_saved_object)) == 0);
+        BS_CHECK(memcmp(&h.ctrls[k], &g.ctrls[k], sizeof(bs_saved_ctrl)) == 0);
+    }
+    BS_CHECK(h.have_ctrls && h.ctrl_count == 2);
+    BS_CHECK(h.sigil_gone_count == 3 && h.sigils_gone[1] == 300 && h.sigil_gone_level[1] == -1);
+    BS_CHECK(h.sigils_gone[2] == 299 && h.sigil_gone_level[2] == 0);
     BS_CHECK(h.have_maps && memcmp(h.maps, g.maps, sizeof h.maps) == 0);
     BS_CHECK_EQ_INT(h.dialogue.global_count, 2);
     BS_CHECK_EQ_INT(bs_dialogue_global(&h.dialogue, "ScampOath"), -3);
@@ -227,6 +242,11 @@ static void test_errors(void)
     BS_CHECK_EQ_INT(read_with("pos = 1 2\n", err), BS_ERR_FORMAT);
     BS_CHECK_EQ_INT(read_with("this line is wrong\n", err), BS_ERR_FORMAT);
     BS_CHECK(strstr(err, "line 6"));
+    BS_CHECK_EQ_INT(read_with("[monster]\ncreature = 1\nlevel = l9.bs6\n", err), BS_ERR_FORMAT);
+    BS_CHECK(strstr(err, "l9.bs6"));
+    BS_CHECK_EQ_INT(read_with("[save]\nother_level = l5.bs6 people\n", err), BS_ERR_FORMAT);
+    BS_CHECK(strstr(err, "people"));
+    BS_CHECK_EQ_INT(read_with("[save]\nother_level = l5.bs6 monsters\n[monster]\ncreature = 1\nlevel = l5.bs6\n", err), BS_OK);
     BS_CHECK_EQ_INT(read_with("[save]\nversion = 99\n", err), BS_ERR_FORMAT);
     BS_CHECK(strstr(err, "newer"));
     bs_arena a;

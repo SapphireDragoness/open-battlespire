@@ -27,6 +27,10 @@ bs_result bs_screen_set_bsi(bs_screen *s, const bs_bsi_image *img);
 /* Draws the image into the default framebuffer of size width x height. */
 void bs_screen_draw(const bs_screen *s, int width, int height);
 
+/* Keeps only the red of what the window shows (width x height), green and blue made 0: the game's TINT.555
+ * when the player is hurt. */
+void bs_screen_keep_red(int width, int height);
+
 /* Maps a window pixel to image coordinates; false if outside the image. */
 bool bs_screen_to_image(const bs_screen *s, int width, int height, float wx, float wy, int *ix, int *iy);
 

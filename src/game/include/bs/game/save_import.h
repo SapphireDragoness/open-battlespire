@@ -19,12 +19,14 @@
  * (0x303FE): the level is read from its BS6 file by the saved level number, the spawn points' monsters
  * are removed, and then each record replaces the object with its id or is made anew. So:
  *
- * - The player: the character, its spells (its type-9 children), where it stands and looks.
+ * - The player: the character, its spells (its type-9 children) and timed effects (type 66), where it
+ *   stands and looks.
  * - Every item, wherever it is: carried, in a carried container, lying in the level, in a level object
  *   (a chest, by its BS6 id), or held by a monster (their loot, in a sack).
  * - The monsters that are left; those not saved are dead. The hidden reserve isn't kept.
- * - The level's placed models that were saved (those with links or controllers): where they are, their
- *   flags (locked) and their clock time (a used gem's return).
+ * - The level's placed models and flats that were saved (those with links or controllers, and speakers that
+ *   have left): where they are, their flags (locked, gone) and their clock time (a used gem's return).
+ * - The player's timed spell effects.
  * - The automap's seen cells, the dialogue variables and visits, speakers leaving, the sigils dispelled,
  *   and the level script's progress.
  *
@@ -32,8 +34,8 @@
  *
  * The original keeps a level's interiors in its world (bs/game/level_spaces.h). With the level's spaces, a
  * save made in an interior names it (level_file, campaign_file), its ids are those of the interior's own
- * file, and the items of every other space are kept for their level (other_levels). The monsters and
- * placed models are only those of the space the player is in: the engine makes the others again.
+ * file, and every other space is kept as a level left through a door (other_levels): its items, monsters,
+ * placed models, controllers and sigils. The controllers become ours (ctrls), each by its object.
  */
 
 typedef enum bs_saved_place {
@@ -69,23 +71,26 @@ typedef struct bs_saved_monster {
     bool greeted;                     /* +0x13 bit 0x40 */
     bool summoned;                    /* +0x226 bit 0x10 */
     bool ally;                        /* on the player's team (+0x22A) */
+    int32_t level;                    /* -1: in the level the player is in; else other_levels[level] */
 } bs_saved_monster;
 
 typedef enum bs_saved_kind { BS_SAVED_KIND_OBJECT, BS_SAVED_KIND_FLAT, BS_SAVED_KIND_LIGHT } bs_saved_kind;
 
 typedef struct bs_saved_object {
     uint32_t id;                      /* the BS6 entity id */
-    bs_saved_kind kind;               /* the original's saves have only placed models */
-    bool active;                      /* its controllers run (ours; the original's are in the tree's state) */
+    bs_saved_kind kind;               /* the original's saves have placed models and flats */
+    bool active;                      /* its controllers run */
     float pos[3];
     int32_t angles[3];                /* 2048 a turn */
     uint16_t flags;                   /* +0x13: byte +0x13 bit 8 locked */
     uint32_t time;                    /* +0x21: a used gem's return on the game's clock */
+    bool gone;                        /* a speaker that has left (TELEPORT or KILL): +0x14 bit 2 */
+    int32_t level;                    /* -1: in the level the player is in; else other_levels[level] */
 } bs_saved_object;
 
 #define BS_SAVED_OBJECT_LOCKED 0x0008u
 
-/* A controller's state (ours; the original's are in bs_save_tree.controls, laid out by the level). */
+/* A controller not as it began (the original's come from bs_save_tree.controls, laid out by the spaces). */
 typedef struct bs_saved_ctrl {
     uint32_t object;                  /* its object's BS6 entity id */
     bs_saved_kind kind;
@@ -93,6 +98,7 @@ typedef struct bs_saved_ctrl {
     bool reversed, running;
     uint32_t start_ms;
     int32_t start[3];
+    int32_t level;                    /* -1: in the level the player is in; else other_levels[level] */
 } bs_saved_ctrl;
 
 #define BS_SAVED_LEVELS 32            /* a campaign level and its interiors (level 5 has 21) */
@@ -132,17 +138,20 @@ typedef struct bs_saved_game {
         uint32_t id;                  /* a speaker's record id, 0 none */
         uint32_t at;                  /* when it goes (game clock) */
     } leaving[8];
-    uint32_t sigils_gone[BS_SAVE_SIGILS];  /* BS6 ids of the sigils dispelled */
+    uint32_t sigils_gone[BS_SAVE_SIGILS];  /* BS6 ids of the sigils dispelled ... */
+    int32_t sigil_gone_level[BS_SAVE_SIGILS];   /* ... and their level: -1 the player's, else other_levels[] */
     uint32_t sigil_gone_count;
     uint32_t links[BS_SAVE_TABLE];    /* the record ids with a dialogue link (STRU 104), for checking */
     uint32_t link_count;
     char other_levels[BS_SAVED_LEVELS][32];   /* levels left through a door (the original's: the level's
                                                  interiors and the level), whose items are kept */
+    bool other_monsters[BS_SAVED_LEVELS];     /* other_levels[k]'s monsters are listed (those not are dead);
+                                                 else they're made again */
     uint32_t other_level_count;
-    /* Ours only (empty from the original's): */
     bs_saved_ctrl *ctrls;
     uint32_t ctrl_count;
-    bool have_ctrls;                  /* the controllers are here (ours), not in the tree */
+    bool have_ctrls;                  /* the controllers are listed (else as the level begins) */
+    /* Ours only (empty from the original's): */
     bool have_maps;                   /* every automap's cells, not just the level's */
     uint8_t maps[BS_SAVED_MAPS][BS_SAVE_AUTOMAP_CELLS];
 } bs_saved_game;

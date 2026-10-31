@@ -94,6 +94,7 @@ typedef ptrdiff_t GLintptr;
     X(void, glScissor, (GLint x, GLint y, GLsizei w, GLsizei h))                                    \
     X(void, glClear, (GLbitfield mask))                                                             \
     X(void, glClearColor, (GLfloat r, GLfloat g, GLfloat b, GLfloat a))                             \
+    X(void, glColorMask, (GLboolean r, GLboolean g, GLboolean b, GLboolean a))                      \
     X(void, glEnable, (GLenum cap))                                                                 \
     X(void, glDisable, (GLenum cap))                                                                \
     X(void, glCullFace, (GLenum mode))                                                              \
@@ -173,6 +174,7 @@ BS_GL_FUNCTIONS(BS_GL_DECLARE)
 #define glScissor bs_glScissor
 #define glClear bs_glClear
 #define glClearColor bs_glClearColor
+#define glColorMask bs_glColorMask
 #define glEnable bs_glEnable
 #define glDisable bs_glDisable
 #define glCullFace bs_glCullFace

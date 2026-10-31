@@ -140,4 +140,22 @@ typedef struct bs_cursor_steer {
  * nothing else changes them. */
 bs_cursor_steer bs_cursor_steer_of(int zone, float amount, int32_t speed, int32_t turn_rate);
 
+/*
+ * Floors that burn (0x41817, from the movement function every frame): standing on a face textured
+ * fpit02, poop00, lava00, gold00, mud00, smth05 or lava01 (the names looked up at the level's start,
+ * 0x418C2) takes the frame's ms x 50 / 1000 in health, as fire (element 0 through the tolerances,
+ * 0x42E2F -> 0x2AA5D) and without a push. The game truncates per frame, so its rate depends on its frame
+ * rate; the engine takes it in steps of 50 ms (the 20 frames a second assumed elsewhere): 2 a step,
+ * 40 a second.
+ */
+#define BS_BURN_STEP_MS 50u
+#define BS_BURN_PER_SECOND 50
+
+/* Whether a floor face's texture burns (names without extension, case ignored). */
+bool bs_floor_burns(const char *texture);
+
+/* The damage of dt_ms more on a burning floor; *carry_ms keeps what's short of a step (0 when the player
+ * steps off). */
+int32_t bs_floor_burn(uint32_t *carry_ms, uint32_t dt_ms);
+
 #endif

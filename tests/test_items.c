@@ -464,6 +464,18 @@ static void test_level_items(void)
     bs_items_free(&it);
 }
 
+/* The game's distance (0x45F99): across |dx| + |dz| - the smaller / 2, then with |dy| the larger + the
+ * smaller / 4. The floor list shows items within 128 of the player. */
+static void test_game_distance(void)
+{
+    const float o[3] = {0, 0, 0};
+    BS_CHECK_EQ_INT(bs_game_distance(o, (const float[3]){100, 0, 0}), 100);
+    BS_CHECK_EQ_INT(bs_game_distance(o, (const float[3]){100, 0, 100}), 150);
+    BS_CHECK_EQ_INT(bs_game_distance(o, (const float[3]){0, -40, 100}), 110);
+    BS_CHECK_EQ_INT(bs_game_distance((const float[3]){639.9f, -5, 15}, (const float[3]){600, -5, 40}), 52);
+    BS_CHECK(bs_game_distance(o, (const float[3]){90, 0, 90}) > BS_ITEM_FLOOR_NEAR); /* 135 */
+}
+
 int main(void)
 {
     setup();
@@ -480,5 +492,6 @@ int main(void)
     BS_RUN(test_take_and_put_level);
     BS_RUN(test_level_items);
     bs_arena_free(&arena);
+    BS_RUN(test_game_distance);
     return BS_TEST_RESULT();
 }

@@ -261,7 +261,8 @@ static void test_talker(void)
     bs_monster_events ev = {.count = 0};
     BS_CHECK(!bs_monster_hurt(&ms, 0, &w, 5, 1, p.pos, 50, &ev));
     BS_CHECK_EQ_INT(ms.list[0].state, BS_AI_APPROACH);
-    BS_CHECK(ev.count == 1 && ev.list[0].kind == BS_MONSTER_SOUND && ev.list[0].value == 400 + 4 * 11 + 2);
+    BS_CHECK(ev.count == 2 && ev.list[0].kind == BS_MONSTER_SOUND && ev.list[0].value == 400 + 4 * 11 + 2);
+    BS_CHECK(ev.list[1].kind == BS_MONSTER_BLEEDS && ev.list[1].monster == 0); /* the blood (0x43886) */
     bs_monsters_free(&ms);
 }
 
@@ -295,7 +296,7 @@ static void test_hurt_and_death(void)
     ev.count = 0;
     BS_CHECK(bs_monster_hurt(&ms, 0, &w, 100, 1, p.pos, 50, &ev));
     BS_CHECK(ms.list[0].dead && !ms.list[0].gone);
-    BS_CHECK(ev.count == 1 && ev.list[0].value == 400 + 4 * 2 + 3);
+    BS_CHECK(ev.count == 1 && ev.list[0].value == 400 + 4 * 2 + 3); /* no blood on a killing blow */
     BS_CHECK_EQ_INT(run(&ms, &p, &r, &now, 100, NULL, BS_MONSTER_GONE), 0);
     BS_CHECK_EQ_INT(ms.list[0].anim, BS_ANIM_DEATH);
     BS_CHECK_EQ_INT(run(&ms, &p, &r, &now, 300, NULL, BS_MONSTER_GONE), 1);

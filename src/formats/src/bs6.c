@@ -349,6 +349,41 @@ bs_result bs_bs6_entity_logic(const bs_bs6_chunk *entity, bs_arena *arena, bs_bs
     return it.err ? BS_ERR_FORMAT : BS_OK;
 }
 
+int bs_bs6_entity_game(const bs_bs6_chunk *entity)
+{
+    int game = -1;
+    bs_bs6_chunk c;
+    bs_bs6_iter it = bs_bs6_iter_make(entity->data, entity->size);
+    while (bs_bs6_next(&it, &c)) {
+        bs_bs6_record r = {0};
+        if (is(&c, "STRU") && parse_record(&c, &r) && r.id == BS_BS6_PROP_GAME)
+            game = bs_bs6_record_i32(&r, 0) != 0; /* the last one counts, as the game reads them in order */
+    }
+    return game;
+}
+
+/* Keeps the entities of one array that belong in this kind of game, in order. */
+#define KEEP_GAME(arr, count, multiplayer)                                       \
+    do {                                                                         \
+        uint32_t n_ = 0;                                                         \
+        for (uint32_t i_ = 0; i_ < (count); i_++) {                              \
+            int g_ = bs_bs6_entity_game(&(arr)[i_].chunk);                       \
+            if (g_ < 0 || (g_ == 1) == (multiplayer))                            \
+                (arr)[n_++] = (arr)[i_];                                         \
+        }                                                                        \
+        removed += (count) - n_;                                                 \
+        (count) = n_;                                                            \
+    } while (0)
+
+uint32_t bs_bs6_keep_game(bs_bs6_level *level, bool multiplayer)
+{
+    uint32_t removed = 0;
+    KEEP_GAME(level->objects, level->object_count, multiplayer);
+    KEEP_GAME(level->flats, level->flat_count, multiplayer);
+    KEEP_GAME(level->lights, level->light_count, multiplayer);
+    return removed;
+}
+
 int32_t bs_bs6_record_i32(const bs_bs6_record *r, uint32_t i)
 {
     if (!r || (uint64_t)i * 4 + 4 > r->size)

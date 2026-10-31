@@ -25,6 +25,8 @@ static const int scenario_new[4] = {195, 295, 426, 323};
 #define NAME_X 170
 #define NAME_Y 242
 #define NAME_MAX 31
+static const int name_done[4] = {528, 416, 575, 479};   /* as Enter (0xEDFBC: 0x322F3) */
+static const int name_cancel[4] = {576, 416, 639, 479}; /* as Esc (0x32355) */
 
 /* ---- male or female (gender.bsi, 0xEDDC2) ---- */
 
@@ -1193,9 +1195,13 @@ creation_action creation_event(creation *cr, const creation_env *env, const SDL_
         } else if (type_into(cr->name, NAME_MAX + 1, e)) {
             if (cr->name[0])
                 go(cr, env, CREATION_GENDER);
-        } else if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN && e->button.button == SDL_BUTTON_LEFT &&
-                   in(help_button, x, y)) {
-            show_help(env, HELP_NAME);
+        } else if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN && e->button.button == SDL_BUTTON_LEFT) {
+            if (in(help_button, x, y))
+                show_help(env, HELP_NAME);
+            else if (in(name_done, x, y) && cr->name[0])
+                go(cr, env, CREATION_GENDER);
+            else if (in(name_cancel, x, y))
+                go(cr, env, CREATION_SCENARIO);
         }
         return CREATION_NOTHING;
     }

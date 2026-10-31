@@ -21,6 +21,9 @@
 #include "bs/render/level_renderer.h"
 #include "bs/render/overlay.h"
 
+/* The player's cries of pain: + 0 or 1; + 2 for a female character (0x43819). */
+#define PAIN_SOUND 0x1A5
+
 /* Sound sources the level audio follows (bs_level_audio_play_at): a monster or a level logic object, by
  * index. Resolved by main.c's sound_source(). */
 #define SOUND_FROM_MONSTER(i) (0x1000000u | (uint32_t)(i))
@@ -73,6 +76,7 @@ typedef struct fight_env {
     uint32_t now_ms;                 /* the level clock */
     int level_number;
     bool multiplayer;
+    bool click_swing;                /* a press swings the weapon (Controls' Weapon Swing "Click") */
     int32_t active_distance;
     int32_t grid_cell;
     bool water;                      /* the level's water surface (0x16C23C), for monsters */
@@ -82,6 +86,7 @@ typedef struct fight_env {
 } fight_env;
 
 #define FIGHT_STUCK 64
+#define FIGHT_BLOOD 16
 #define FIGHT_MODEL_ARROW (BS_ITEM_LAST_WEAPON + 1)   /* earrow.3d, after the weapons in hand */
 #define FIGHT_MODELS (BS_ARROWS + 2)                  /* at most: the weapon, its arrow, those in flight */
 
@@ -111,6 +116,12 @@ typedef struct fight {
     const bs_bsi_image *missile_images[BS_ELEMENT_COUNT];   /* spel00-04 */
     const bs_bsi_image *burst_images[BS_ELEMENT_COUNT];     /* expl00-04 */
     const bs_bsi_image *sparkle;                            /* twinkle.bsi */
+    const bs_bsi_image *blood;                              /* blod00.bsi */
+    struct {
+        float pos[3];                                       /* the image's foot */
+        uint32_t start;
+        bool live;
+    } blood_at[FIGHT_BLOOD];                                /* blood where monsters were hurt */
     const bs_bsi_image *hands[BS_ELEMENT_COUNT];            /* cast00-04 */
     const bs_bsi_image *icons[27];                          /* symb00-26 */
     /* Arrows. */

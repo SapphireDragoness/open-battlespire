@@ -140,6 +140,25 @@ static void test_import(void)
     uint8_t *reserve = record(f, &n, BS_SAVE_MONSTER, 81470, BS_SAVE_PLAYER_ID, BS_SAVE_PLAYER_BODY);
     reserve[0x14] = 2;
     item(f, &n, 81471, 81470, 16, 0);       /* the reserve's: not kept */
+    /* A timed effect (0x295A0): Cure Health by name, icon 5 (+1), Speed + 10 in 16.16, a pool. */
+    uint8_t *eff = record(f, &n, BS_SAVE_EFFECT, 81788, BS_SAVE_PLAYER_ID, 0x1C1);
+    uint8_t *eb = eff + BS_SAVE_HEADER;
+    memcpy(eb, "Cure Health", 12);
+    put32(eb + 0x20 + 12 * 6, 10u << 16);
+    put32(eb + 0x194, 3);
+    put32(eb + 0x19C, 1000);
+    eb[0x1A0] = 6;
+    put32(eb + 0x1A4, 600000);
+    put32(eb + 0x1A8, 0x80000);
+    put32(eb + 0x1B4, 30);
+    uint8_t *odd = record(f, &n, BS_SAVE_EFFECT, 81789, BS_SAVE_PLAYER_ID, 0x1C1);
+    memcpy(odd + BS_SAVE_HEADER, "No Such Spell", 14);  /* not a spell: left out */
+    /* Flats: an NPC who has left (+0x14 bit 2), one with controllers. */
+    uint8_t *josian = record(f, &n, BS_SAVE_FLAT, 93, BS_SAVE_PARENT_LEVEL, 1);
+    josian[0x14] = 2;
+    uint8_t *lift = record(f, &n, BS_SAVE_FLAT, 94, BS_SAVE_PARENT_LEVEL, 1);
+    putf(lift + 11, -40.0f);
+    put16(lift + 0x27, 3);
     put32(f + n, 0);
     n += 4;
 
@@ -250,8 +269,24 @@ static void test_import(void)
     BS_CHECK(m->greeted && !m->summoned && !m->ally);
     BS_CHECK(g.monsters[1].summoned && g.monsters[1].ally);
 
-    BS_CHECK_EQ_INT(g.object_count, 1);
+    BS_CHECK_EQ_INT(g.object_count, 3);
     BS_CHECK_EQ_INT(g.objects[0].id, 51);
+    BS_CHECK(g.objects[0].kind == BS_SAVED_KIND_OBJECT && !g.objects[0].gone);
+    BS_CHECK(g.objects[1].kind == BS_SAVED_KIND_FLAT && g.objects[1].id == 93 && g.objects[1].gone);
+    BS_CHECK(g.objects[2].kind == BS_SAVED_KIND_FLAT && g.objects[2].id == 94 && !g.objects[2].gone);
+    BS_CHECK(g.objects[2].pos[1] == -40.0f);
+
+    const bs_effect *e = &c->effects[0];
+    BS_CHECK_EQ_INT(e->spell, 21);
+    BS_CHECK_EQ_INT(e->icon, 5);
+    BS_CHECK_EQ_INT(e->until, 600000);
+    BS_CHECK_EQ_INT(e->flags, 0x80000);
+    BS_CHECK_EQ_INT(e->attributes[6], 10);
+    BS_CHECK_EQ_INT(e->attributes[0], 0);
+    BS_CHECK_EQ_INT(e->tick_damage, 3);
+    BS_CHECK_EQ_INT(e->tick_ms, 1000);
+    BS_CHECK_EQ_INT(e->pools[0], 30);
+    BS_CHECK_EQ_INT(c->effects[1].spell, 0);
     BS_CHECK(g.objects[0].flags & BS_SAVED_OBJECT_LOCKED);
     BS_CHECK_EQ_INT(g.objects[0].angles[1], 300);
     BS_CHECK_EQ_INT(g.objects[0].time, 600000);
@@ -290,10 +325,17 @@ static void test_import_interior(void)
 {
     static bs_level_spaces sp;
     memset(&sp, 0, sizeof sp);
-    sp.spaces[0] = (bs_level_space){"l5.bs6", 0, 0, 697, 0, 0};
-    sp.spaces[1] = (bs_level_space){"tavrn2.bs6", 310, 956, 51, 0, 0};
-    sp.spaces[2] = (bs_level_space){"inshop.bs6", 489, 3243, 31, 0, 0};
+    sp.spaces[0] = (bs_level_space){"l5.bs6", 0, 0, 697, 0, 1};
+    sp.spaces[1] = (bs_level_space){"tavrn2.bs6", 310, 956, 51, 1, 0};
+    sp.spaces[2] = (bs_level_space){"inshop.bs6", 489, 3243, 31, 1, 1};
     sp.count = 3;
+    /* The controller table's chains: the level's object 51 (one controller), the shop's 7 (two). */
+    static uint32_t lengths[] = {1, 2}, chain_ids[] = {51, 7};
+    static uint8_t chain_kinds[] = {BS_LOGIC_OBJECT, BS_LOGIC_OBJECT};
+    sp.chain_lengths = lengths;
+    sp.chain_ids = chain_ids;
+    sp.chain_kinds = chain_kinds;
+    sp.chain_count = 2;
 
     static uint8_t f[65536];
     size_t n = 0;
@@ -322,6 +364,20 @@ static void test_import_interior(void)
     record(f, &n, BS_SAVE_OBJECT, 956 + 8, 310, 0x6F);
     put32(f + n, 0);
     n += 4;
+    /* The controllers: 51's reversed; the shop's 7: the first as it began, the second running (its object,
+     * the start position and two more, the start time); then the running chains: the shop's. */
+    f[n++] = 2;
+    f[n++] = 0;
+    f[n++] = 1;
+    put32(f + n, 3243 + 7);
+    putf(f + n + 4, 10.0f); /* floats (0x4BE40) */
+    putf(f + n + 8, 20.4f);
+    putf(f + n + 12, 29.6f);
+    put32(f + n + 40, 700000);
+    n += 44;
+    put32(f + n, 1);
+    f[n + 4] = 1;
+    n += 5;
 
     static uint8_t vars[BS_SAVE_VARS_SIZE];
     memset(vars, 0, sizeof vars);
@@ -348,31 +404,53 @@ static void test_import_interior(void)
     BS_CHECK_EQ_INT(g.seen[7], 1);            /* the shop's grid */
     BS_CHECK_EQ_INT(g.seen[41], 0);
 
+    /* Every other space is kept as a level left, with its monsters: the level, then the tavern. */
+    BS_CHECK_EQ_INT(g.other_level_count, 2);
+    BS_CHECK(strcmp(g.other_levels[0], "l5.bs6") == 0 && strcmp(g.other_levels[1], "tavrn2.bs6") == 0);
+    BS_CHECK(g.other_monsters[0] && g.other_monsters[1]);
     BS_CHECK_EQ_INT(g.item_count, 7);
     const bs_saved_item *it = g.items;
     BS_CHECK(it[0].place == BS_SAVED_CARRIED && it[0].level == -1);
     BS_CHECK(it[1].place == BS_SAVED_FLOOR && it[1].level == -1 && it[1].id == 4);
-    BS_CHECK_EQ_INT(g.other_level_count, 2);
-    BS_CHECK(strcmp(g.other_levels[0], "tavrn2.bs6") == 0 && strcmp(g.other_levels[1], "l5.bs6") == 0);
-    BS_CHECK(it[2].place == BS_SAVED_FLOOR && it[2].level == 0 && it[2].id == 2);
-    BS_CHECK(it[3].place == BS_SAVED_IN_OBJECT && it[3].level == 0 && it[3].ref == 9);
-    BS_CHECK(it[4].place == BS_SAVED_IN_OBJECT && it[4].level == 1 && it[4].ref == 304);
-    BS_CHECK(it[5].place == BS_SAVED_FLOOR && it[5].level == 1 && it[5].id == 305);
-    BS_CHECK_EQ_INT(it[6].place, BS_SAVED_NOWHERE);
+    BS_CHECK(it[2].place == BS_SAVED_FLOOR && it[2].level == 1 && it[2].id == 2);
+    BS_CHECK(it[3].place == BS_SAVED_IN_OBJECT && it[3].level == 1 && it[3].ref == 9);
+    BS_CHECK(it[4].place == BS_SAVED_IN_OBJECT && it[4].level == 0 && it[4].ref == 304);
+    BS_CHECK(it[5].place == BS_SAVED_FLOOR && it[5].level == 0 && it[5].id == 305);
+    BS_CHECK(it[6].place == BS_SAVED_MONSTER && it[6].level == 1 && it[6].ref == 2); /* the tavern's loot */
 
-    /* The shop's monsters and models only, by the shop file's ids. */
-    BS_CHECK_EQ_INT(g.monster_count, 1);
-    BS_CHECK_EQ_INT(g.monsters[0].id, 20);
-    BS_CHECK_EQ_INT(g.object_count, 1);
-    BS_CHECK_EQ_INT(g.objects[0].id, 7);
-    BS_CHECK_EQ_INT(g.sigil_gone_count, 0);
+    /* Each space's monsters and models, by its own file's ids. */
+    BS_CHECK_EQ_INT(g.monster_count, 3);
+    BS_CHECK(g.monsters[0].id == 20 && g.monsters[0].level == -1);
+    BS_CHECK(g.monsters[1].id == 600 && g.monsters[1].level == 0);
+    BS_CHECK(g.monsters[2].id == 30 && g.monsters[2].level == 1);
+    BS_CHECK_EQ_INT(g.object_count, 3);
+    BS_CHECK(g.objects[0].id == 7 && g.objects[0].level == -1 && g.objects[0].active);
+    BS_CHECK(g.objects[1].id == 51 && g.objects[1].level == 0 && !g.objects[1].active);
+    BS_CHECK(g.objects[2].id == 8 && g.objects[2].level == 1);
+    /* The controllers by their objects: the level's reversed, the shop's second running. */
+    BS_CHECK(g.have_ctrls);
+    BS_CHECK_EQ_INT(g.ctrl_count, 2);
+    const bs_saved_ctrl *ct = g.ctrls;
+    BS_CHECK(ct[0].object == 51 && ct[0].level == 0 && ct[0].index == 0 && ct[0].reversed && !ct[0].running);
+    BS_CHECK(ct[1].object == 7 && ct[1].level == -1 && ct[1].index == 1 && ct[1].running && !ct[1].reversed);
+    BS_CHECK(ct[1].start_ms == 700000 && ct[1].start[0] == 10 && ct[1].start[1] == 20 && ct[1].start[2] == 30);
+    /* The sigil dispelled outside is the level's; a speaker leaving the shop is the shop's. */
+    BS_CHECK_EQ_INT(g.sigil_gone_count, 1);
+    BS_CHECK(g.sigils_gone[0] == 296 && g.sigil_gone_level[0] == 0);
     BS_CHECK_EQ_INT(g.leaving[0].id, 21);
     BS_CHECK_EQ_INT(g.leaving[0].at, 560000);
+
+    /* A controller table that doesn't fit leaves the controllers out. */
+    sp.chain_lengths[1] = 5;
+    BS_CHECK_EQ_INT(bs_save_import(&t, &v, &sp, NULL, &a, &g), BS_OK);
+    BS_CHECK(!g.have_ctrls && g.ctrl_count == 0);
+    sp.chain_lengths[1] = 2;
 
     /* Without the spaces, all of it is the level's. */
     BS_CHECK_EQ_INT(bs_save_import(&t, &v, NULL, NULL, &a, &g), BS_OK);
     BS_CHECK(!g.level_file[0]);
     BS_CHECK_EQ_INT(g.other_level_count, 0);
+    BS_CHECK(!g.have_ctrls && g.monster_count == 3 && g.monsters[2].level == -1);
     BS_CHECK_EQ_INT(g.seen[41], 1);
     bs_arena_free(&a);
 }

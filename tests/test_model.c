@@ -226,6 +226,40 @@ static void test_bs6_logic(void)
     bs_arena_free(&arena);
 }
 
+/* STRU 122: each kind of game drops the other's entities, keeping the rest in order. */
+static void test_bs6_games(void)
+{
+    static uint8_t lv[4096];
+    size_t n = synth_bs6_games(lv, sizeof lv);
+    BS_CHECK(n > 0);
+    bs_arena arena;
+    bs_arena_init(&arena, 0);
+    bs_bs6_level l;
+    BS_CHECK_EQ_INT(bs_bs6_parse(lv, n, &arena, &l), BS_OK);
+    BS_CHECK(l.object_count == 4 && l.flat_count == 2);
+    BS_CHECK_EQ_INT(bs_bs6_entity_game(&l.objects[0].chunk), -1);
+    BS_CHECK_EQ_INT(bs_bs6_entity_game(&l.objects[1].chunk), 0);
+    BS_CHECK_EQ_INT(bs_bs6_entity_game(&l.objects[2].chunk), 1);
+    BS_CHECK_EQ_INT(bs_bs6_entity_game(&l.flats[0].chunk), 1);
+
+    bs_bs6_level single = l, multi = l;
+    bs_bs6_object objs[4];
+    bs_bs6_flat flats[2];
+    memcpy(objs, l.objects, sizeof objs);
+    memcpy(flats, l.flats, sizeof flats);
+    multi.objects = objs;
+    multi.flats = flats;
+    BS_CHECK_EQ_INT(bs_bs6_keep_game(&single, false), 2);
+    BS_CHECK(single.object_count == 3 && single.objects[0].id == 50 && single.objects[1].id == 51 &&
+             single.objects[2].id == 53);
+    BS_CHECK(single.flat_count == 1 && single.flats[0].id == 61);
+    BS_CHECK_EQ_INT(bs_bs6_keep_game(&multi, true), 1);
+    BS_CHECK(multi.object_count == 3 && multi.objects[0].id == 50 && multi.objects[1].id == 52 &&
+             multi.objects[2].id == 53);
+    BS_CHECK(multi.flat_count == 2 && multi.flats[0].id == 60);
+    bs_arena_free(&arena);
+}
+
 static void test_nodes(void)
 {
     size_t n = synth_nodes(buf, sizeof buf);
@@ -291,6 +325,7 @@ int main(void)
     BS_RUN(test_bs6_rejects);
     BS_RUN(test_rotation);
     BS_RUN(test_bs6_logic);
+    BS_RUN(test_bs6_games);
     BS_RUN(test_nodes);
     BS_RUN(test_strmap);
     return BS_TEST_RESULT();

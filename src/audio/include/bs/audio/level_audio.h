@@ -77,9 +77,9 @@ void bs_level_audio_start(bs_level_audio *la, const bs_level_info *info);
  * facing `yaw` (radians) by the game's rule for near sounds (0x1CBD4): not
  * started 768 units or more away. pos NULL: the player's own sound, centred
  * at full volume. source: 0 for a sound that stays at pos, else a tag that
- * la->locate follows while it plays. */
-void bs_level_audio_play_at(bs_level_audio *la, int32_t id, uint32_t source, const float pos[3],
-                            const float listener[3], float yaw);
+ * la->locate follows while it plays. Returns its voice, or 0 if it didn't start. */
+bs_voice bs_level_audio_play_at(bs_level_audio *la, int32_t id, uint32_t source, const float pos[3],
+                                const float listener[3], float yaw);
 
 /* Advances by dt seconds with the listener at pos (level units), facing yaw (radians): places the
  * effects playing, and rolls for ambience. */
