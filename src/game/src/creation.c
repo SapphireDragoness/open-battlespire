@@ -1,6 +1,10 @@
 #include "bs/game/creation.h"
 
+#include <stdlib.h>
 #include <string.h>
+
+#include "bs/formats/save.h"
+#include "bs/game/save_edit.h"
 
 /* RE references are GAME.EXE addresses; see docs/re/README.md, "Character creation". */
 
@@ -573,4 +577,87 @@ void bs_creation_apply(const bs_class *cls, int race, bs_character *out, bs_equi
     out->adrenaline_rush = cls->adrenaline_rush;
     if (rules)
         *rules = (bs_equip_rules){cls->forbidden_weapons, cls->max_armour, cls->max_material};
+}
+
+/* ---- saving the class (0x3B39C) ---- */
+
+static bool item_body(const bs_item *it, const uint8_t *exe, size_t exe_size, const bs_item_db *db,
+                      uint8_t out[BS_SAVE_ITEM_BODY])
+{
+    const uint8_t *base = bs_item_base_record(exe, exe_size, it->base);
+    if (!base)
+        return false;
+    uint8_t magic[BS_MAGIC_RECORD];
+    if (it->magic) {
+        const bs_magic *m = db ? bs_item_db_magic(db, it->magic) : NULL;
+        if (m) {
+            bs_magic_record(m, magic);
+        } else {
+            memset(magic, 0, sizeof magic); /* not in the tables: the id at least */
+            for (int k = 0; k < 4; k++)
+                magic[0x22F + k] = (uint8_t)((uint32_t)it->magic >> (8 * k));
+        }
+    }
+    bs_save_item_body(base, it, it->magic ? magic : NULL, out);
+    return true;
+}
+
+bs_result bs_creation_write(const bs_creation *c, const bs_creation_shop *equipment, const bs_creation_shop *magic,
+                            const bs_item *others, uint32_t other_count, const bs_class_out *who,
+                            const uint8_t *exe, size_t exe_size, const bs_item_db *db, uint8_t **out,
+                            size_t *size)
+{
+    *out = NULL;
+    *size = 0;
+    const uint8_t *table = exe ? bs_spell_table(exe, exe_size) : NULL;
+    if (!table || !bs_item_base_record(exe, exe_size, 0))
+        return BS_ERR_NOT_FOUND;
+
+    bs_class cls = c->cls;
+    cls.points_left = c->points;
+    cls.item_count = 0; /* the items are below */
+
+    uint8_t spells[BS_SCL_MAX_SPELLS][BS_SPELL_RECORD];
+    uint32_t spell_count = 0;
+    for (uint32_t i = 0; i < cls.spell_count && i < BS_SCL_MAX_SPELLS; i++) {
+        const bs_spell *s = &cls.spells[i];
+        if (s->effect >= 1 && s->effect <= BS_SPELL_COUNT)
+            memcpy(spells[spell_count], table + (size_t)(s->effect - 1) * BS_SPELL_RECORD, BS_SPELL_RECORD);
+        else
+            memset(spells[spell_count], 0, BS_SPELL_RECORD);
+        bs_spell_write(s, spells[spell_count++]);
+    }
+
+    enum { MAX_ITEMS = BS_SCL_MAX_ITEMS + 2 * BS_CREATION_STOCK };
+    uint8_t (*items)[BS_SAVE_ITEM_BODY] = malloc(sizeof *items * MAX_ITEMS);
+    uint8_t flags[MAX_ITEMS];
+    if (!items)
+        return BS_ERR_NOMEM;
+    uint32_t n = 0;
+    bs_result r = BS_OK;
+    for (uint32_t i = 0; i < other_count && n < MAX_ITEMS && r == BS_OK; i++) {
+        flags[n] = 0;
+        r = item_body(&others[i], exe, exe_size, db, items[n++]) ? BS_OK : BS_ERR_FORMAT;
+    }
+    const bs_creation_shop *shops[2] = {equipment, magic};
+    for (int k = 0; k < 2 && r == BS_OK; k++)
+        for (uint32_t i = 0; shops[k] && i < shops[k]->count && n < MAX_ITEMS && r == BS_OK; i++) {
+            if (!shops[k]->bought[i])
+                continue;
+            flags[n] = 0x10;
+            r = item_body(&shops[k]->items[i], exe, exe_size, db, items[n++]) ? BS_OK : BS_ERR_FORMAT;
+        }
+
+    if (r == BS_OK) {
+        bs_class_out o = *who;
+        o.cls = &cls;
+        o.spells = (const uint8_t(*)[BS_SPELL_RECORD])spells;
+        o.spell_count = spell_count;
+        o.items = (const uint8_t(*)[BS_SAVE_ITEM_BODY])items;
+        o.item_flags = flags;
+        o.item_count = n;
+        r = bs_class_write(&o, out, size);
+    }
+    free(items);
+    return r;
 }

@@ -36,8 +36,10 @@
  *   either then changed in the CharacterMaker (char00.bsi) with build points (bs_creation): the class's
  *   name, wounds, attributes, its twelve skills (picked from plst00.bsi), and its pages: spells (char02,
  *   char03), equipment and magic items bought one at a time (char05, char07), advantages and
- *   disadvantages (char08 with char09's ticks and char10's greyed out choices). Saving the class isn't
- *   there yet.
+ *   disadvantages (char08 with char09's ticks and char10's greyed out choices). Save writes the class as
+ *   a class file (bs_creation_write) in our classes folder, asking first (exist0.bsi) if one of that name and
+ *   level is there already; the list shows ours with the install's, ours in place of the install's of the
+ *   same number.
  *
  * Every screen's help button shows its help page (the menus' help, help00 .. help10), as entering it does
  * while help pops up by itself.
@@ -92,6 +94,9 @@ typedef struct creation_env {
     menus *help;                               /* its help pages */
     const char *save_root;                     /* the install, holding SAVE0 .. SAVE9; NULL: none */
     const char *saves_dir;                     /* ours (loadsave.h); NULL: none */
+    const char *classes_dir;                   /* our classes (CLASSnnn.SCL); NULL: none, no saving */
+    const uint8_t *exe;                        /* GAME.EXE's bytes, for saving a class; NULL: none */
+    size_t exe_size;
     void *ctx;
     void (*message)(void *ctx, const char *text);
     void (*sound)(void *ctx, int32_t id);
@@ -104,9 +109,13 @@ typedef struct creation_env {
 #define CREATION_FACE_PARTS 64
 
 typedef struct creation_class_file {
-    char file[24];                    /* "GAMEDATA/CLASS000.SCL" */
+    int number;                       /* CLASSnnn.SCL */
+    bool ours;                        /* in classes_dir, else the install's GAMEDATA */
     char line[48];                    /* "Acrobat (1)" */
 } creation_class_file;
+
+/* The CharacterMaker's questions: Cancel's "Are you sure?" (sure00.bsi), Save's "already exists" (exist0.bsi). */
+typedef enum creation_confirm { CONFIRM_NONE, CONFIRM_CANCEL, CONFIRM_OVERWRITE } creation_confirm;
 
 typedef struct creation {
     creation_screen screen;
@@ -133,7 +142,8 @@ typedef struct creation {
     int offered[BS_SPELL_COUNT], offered_count;
     uint32_t added_now;               /* spells added since the add page opened (Cancel takes them back) */
     int32_t added_cost;
-    bool confirm;                     /* Cancel's "Are you sure?" */
+    creation_confirm confirm;
+    int overwrite;                    /* the number of the class Save would replace */
     /* Holding a step button repeats it every 300 ms (0x387A1). */
     int held;                         /* the button held, or -1 */
     int held_x, held_y;

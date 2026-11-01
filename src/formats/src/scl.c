@@ -2,6 +2,7 @@
 
 #include "bs/formats/save.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #define PLAYER_MIN 0x2E2              /* what is read of it; CLASS002.SCL's is shorter than the rest (743 bytes) */
@@ -15,6 +16,12 @@ static int32_t i32(const uint8_t *p)
 static uint16_t u16(const uint8_t *p)
 {
     return (uint16_t)(p[0] | p[1] << 8);
+}
+
+static void put32(uint8_t *p, int32_t v)
+{
+    for (int k = 0; k < 4; k++)
+        p[k] = (uint8_t)((uint32_t)v >> (8 * k));
 }
 
 static void copy_str(char *dst, size_t cap, const uint8_t *src, size_t max)
@@ -104,4 +111,120 @@ bs_result bs_class_parse(const uint8_t *data, size_t size, bs_class *out)
     }
     bs_arena_free(&a);
     return res;
+}
+
+/* ---- writing ---- */
+
+#define AUTOMAP_BODY 0x4B5
+#define AUTOMAP_W 40
+#define AUTOMAP_H 30
+#define FIRST_ID (1u << 16 | 10000u)   /* new objects' ids (0x21DE4, 0x22ECC) */
+
+static void class_fields(uint8_t *at, const bs_class *c)
+{
+    memset(at, 0, 0x38);
+    for (size_t n = 0; n < sizeof c->class_name - 1 && c->class_name[n]; n++)
+        at[n] = (uint8_t)c->class_name[n];
+    at[0x18] = c->resists;
+    at[0x19] = c->immune;
+    at[0x1A] = c->acute_hearing;
+    at[0x1B] = c->spell_absorption;
+    at[0x1C] = c->rapid_healing;
+    at[0x1D] = c->regenerate_health;
+    at[0x1E] = c->regenerate_sp;
+    at[0x1F] = c->athleticism;
+    put32(at + 0x20, c->magery);
+    at[0x24] = c->adrenaline_rush;
+    at[0x25] = c->low_tolerance;
+    at[0x26] = c->critical_weakness;
+    at[0x27] = c->no_sp_regen;
+    at[0x28] = c->forbidden_weapons;
+    at[0x29] = c->max_armour;
+    at[0x2A] = c->forbidden_shield;
+    at[0x2B] = c->max_material;
+    memcpy(at + 0x2C, c->class_skills, BS_SCL_CLASS_SKILLS);
+}
+
+static void player_body(uint8_t b[BS_SAVE_PLAYER_BODY], const bs_class_out *in)
+{
+    const bs_class *c = in->cls;
+    memset(b, 0, BS_SAVE_PLAYER_BODY);
+    for (size_t n = 0; n < sizeof in->name - 1 && in->name[n]; n++)
+        b[n] = (uint8_t)in->name[n];
+    for (int k = 0; k < 8; k++) {
+        put32(b + 0x20 + 4 * k, 50);
+        put32(b + 0x40 + 4 * k, c->attributes[k]);
+    }
+    put32(b + 0x6E, c->wounds);
+    for (int k = 0; k < BS_SCL_SKILLS; k++) {
+        put32(b + 0x72 + 12 * k, 5);
+        put32(b + 0x7A + 12 * k, c->skills[k]);
+    }
+    class_fields(b + 0x17A, c);
+    memcpy(b + 0x1B2, b + 0x17A, 0x38);
+    put32(b + 0x20A, c->points_left);
+    put32(b + 0x226, in->female ? 8 : 0);
+    b[0x23E] = in->hair;
+    b[0x23F] = in->eyes;
+    b[0x240] = in->mouth;
+    b[0x25D] = in->race;
+    b[0x29F] = (uint8_t)(c->level > 0 ? c->level : 1);
+    b[0x2E1] = c->points_hundreds;
+}
+
+/* A record: its length, then the object's header and body. */
+static uint8_t *record(uint8_t *at, uint8_t type, uint8_t flags, uint32_t id, uint32_t parent, size_t body)
+{
+    put32(at, (int32_t)(BS_SAVE_HEADER + body));
+    uint8_t *h = at + 4;
+    memset(h, 0, BS_SAVE_HEADER);
+    h[0] = type;
+    h[0x14] = flags;
+    put32(h + 0x1D, (int32_t)id);
+    put32(h + 0x25, -1); /* no links */
+    put32(h + 0x39, (int32_t)parent);
+    return h + BS_SAVE_HEADER;
+}
+
+bs_result bs_class_write(const bs_class_out *in, uint8_t **out, size_t *size)
+{
+    *out = NULL;
+    *size = 0;
+    if (!in->cls || (in->spell_count && !in->spells) || (in->item_count && (!in->items || !in->item_flags)))
+        return BS_ERR_ARGS;
+    size_t n = 4 + BS_SAVE_HEADER + BS_SAVE_PLAYER_BODY + (size_t)in->spell_count * (4 + BS_SAVE_HEADER + BS_SPELL_RECORD) +
+               4 + BS_SAVE_HEADER + AUTOMAP_BODY + (size_t)in->item_count * (4 + BS_SAVE_HEADER + BS_SAVE_ITEM_BODY);
+    uint8_t *f = malloc(n);
+    if (!f)
+        return BS_ERR_NOMEM;
+    uint8_t *p = f;
+    uint32_t id = FIRST_ID;
+
+    uint8_t *b = record(p, BS_SAVE_PLAYER, 0, BS_SAVE_PLAYER_ID, BS_SAVE_PARENT_ROOT, BS_SAVE_PLAYER_BODY);
+    p[4 + 0x13] = 1; /* as the game's player has it */
+    put32(p + 4 + 0x29, (int32_t)in->clock);
+    player_body(b, in);
+    p = b + BS_SAVE_PLAYER_BODY;
+
+    for (uint32_t i = 0; i < in->spell_count; i++) {
+        b = record(p, BS_SAVE_SPELL, 2, id++, BS_SAVE_PLAYER_ID, BS_SPELL_RECORD);
+        memcpy(b, in->spells[i], BS_SPELL_RECORD);
+        p = b + BS_SPELL_RECORD;
+    }
+
+    b = record(p, BS_SAVE_AUTOMAP, 0, id++, BS_SAVE_PLAYER_ID, AUTOMAP_BODY);
+    p[4 + 1] = AUTOMAP_W; /* the grid's size in the angles */
+    p[4 + 3] = AUTOMAP_H;
+    memset(b, 0, AUTOMAP_BODY);
+    p = b + AUTOMAP_BODY;
+
+    for (uint32_t i = 0; i < in->item_count; i++) {
+        b = record(p, BS_SAVE_ITEM, in->item_flags[i], id++, BS_SAVE_PLAYER_ID, BS_SAVE_ITEM_BODY);
+        memcpy(b, in->items[i], BS_SAVE_ITEM_BODY);
+        p = b + BS_SAVE_ITEM_BODY;
+    }
+
+    *out = f;
+    *size = (size_t)(p - f);
+    return BS_OK;
 }

@@ -148,6 +148,21 @@ int32_t bs_creation_shop_cost(const bs_creation_shop *s, uint32_t i);
 bs_creation_result bs_creation_buy(bs_creation *c, bs_creation_shop *s, uint32_t i);
 void bs_creation_sell(bs_creation *c, bs_creation_shop *s, uint32_t i);
 
+/*
+ * The class file the CharacterMaker's Save writes (0x3B39C; bs_class_write): the class with points left, its
+ * spells, the items it carries (`others`) and those bought in the shops (0x3BC97 copies them to the player
+ * first, flagged 0x10: the equipment's, then the magic items'). `who` has the character (name, sex, race, face)
+ * and the clock; the rest of it is filled in here.
+ *
+ * Spells are the table's records in GAME.EXE (exe) with the class's choices over them; items their base
+ * records (bs_item_base_record) with their enchantments as the MG tables have them (bs_magic_record).
+ * BS_ERR_NOT_FOUND without the tables in exe. The bytes are malloc'd.
+ */
+bs_result bs_creation_write(const bs_creation *c, const bs_creation_shop *equipment, const bs_creation_shop *magic,
+                            const bs_item *others, uint32_t other_count, const bs_class_out *who,
+                            const uint8_t *exe, size_t exe_size, const bs_item_db *db, uint8_t **out,
+                            size_t *size);
+
 typedef enum bs_creation_check {
     BS_CHECK_READY,
     BS_CHECK_NO_NAME,         /* "You need to name your class." */

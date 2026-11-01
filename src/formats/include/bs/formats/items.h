@@ -118,6 +118,7 @@ static inline bool bs_item_is_armour(uint32_t base)
 
 typedef struct bs_magic {
     char name[48];          /* without its quotes */
+    char record_name[48];   /* as the game keeps it (0x52EE1): less the first and last characters */
     int32_t id;
     int32_t item;           /* the kind of item it goes on (0 weapon, 1 armour, ...); see items.md */
     int32_t spell[5];
@@ -138,6 +139,26 @@ bs_result bs_magic_parse(const uint8_t *text, size_t size, bs_arena *arena, bs_m
 
 /* The record with an id, or NULL. */
 const bs_magic *bs_magic_find(const bs_magic_table *t, int32_t id);
+
+/*
+ * An enchantment as the game holds it (0x52EE1, read at start-up by 0x53577) and copies into an item at +0xB3
+ * (0x524F6): 0x233 bytes.
+ *
+ *   +0x00   the name (the suffix), at most 32 bytes
+ *   +0x20   Level, a byte;  +0x21 Item, a byte
+ *   +0xBA + 12 n   App: each pair "n, value" puts value here (a 32-bit number), up to a 100
+ *   +0x1E2  what Adv's numbers set (to a -1), laid out as the player record's fields from +0x17A, so the class's
+ *           advantages are at +0x1FA: 9-13 resistance and 14-18 immunity (bits by element), 19-24 Acute Hearing ..
+ *           Athleticism, 25-28 Increase Magery x 1 .. 3, 29 Adrenaline Rush, 30 no spell point regeneration,
+ *           31-35 forbidden weapons, 36-38 heaviest armour none .. medium, 39 no shield, 40 material Orcish,
+ *           41-45 low tolerance, 46-50 critical weakness
+ *   +0x21A  Spell's five numbers, a byte each
+ *   +0x21F  Uses: the charges; +0x223 the same (the maximum)
+ *   +0x22F  ID#
+ */
+#define BS_MAGIC_RECORD 0x233
+#define BS_MAGIC_ADV 0x1E2
+void bs_magic_record(const bs_magic *m, uint8_t out[BS_MAGIC_RECORD]);
 
 /* The BS6 properties that place items (docs/formats/bs6.md). */
 enum {

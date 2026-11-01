@@ -192,8 +192,9 @@ enum {
 
 /* Messages (GAME.EXE's table). */
 enum {
-    MSG_NEGATIVE = 131, MSG_NO_NAME = 132, MSG_SKILLS = 133, MSG_NAME_CLASS = 139, MSG_NO_POINTS = 431,
-    MSG_COST = 513, MSG_SKILL_LIMIT = 525, MSG_ATTRIBUTE = 527, MSG_DEPENDENT = 565
+    MSG_NEGATIVE = 131, MSG_NO_NAME = 132, MSG_SKILLS = 133, MSG_SAVED = 134, MSG_NAME_CLASS = 139,
+    MSG_NO_POINTS = 431, MSG_COST = 513, MSG_SAVING = 515, MSG_SKILL_LIMIT = 525, MSG_ATTRIBUTE = 527,
+    MSG_DEPENDENT = 565
 };
 
 
@@ -393,27 +394,66 @@ static int part_number(const creation *cr, int p)
     return cr->part_count[p] > 0 ? cr->parts[p][cr->part_at[p]] : p == 0 ? 0 : 1;
 }
 
+/* ---- class files ---- */
+
+#define CLASS_NUMBERS 1000                /* class%03d.scl (0x3B5C1) */
+
+/* Our class file n's path. */
+static bool our_class_path(const creation_env *env, int n, char *out, size_t cap)
+{
+    char name[16];
+    snprintf(name, sizeof name, "CLASS%03d.SCL", n);
+    return env->classes_dir && bs_path_join(out, cap, env->classes_dir, name);
+}
+
+/* Class file n, ours if we have it, else the install's; false if there's neither. */
+static bool class_file_read(const creation_env *env, int n, bool *ours, bs_arena *a, uint8_t **data, size_t *size)
+{
+    char path[BS_PATH_MAX];
+    if (our_class_path(env, n, path, sizeof path) && bs_fs_is_file(path)) {
+        *ours = true;
+        return bs_fs_read_file(path, a, data, size) == BS_OK;
+    }
+    *ours = false;
+    char file[32];
+    snprintf(file, sizeof file, "GAMEDATA/CLASS%03d.SCL", n);
+    return env->vfs && bs_vfs_exists(env->vfs, file) == BS_OK && bs_vfs_read(env->vfs, file, a, data, size) == BS_OK;
+}
+
+static bool class_read(const creation_env *env, int n, bs_class *out)
+{
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    uint8_t *data;
+    size_t size;
+    bool ours;
+    bool ok = class_file_read(env, n, &ours, &a, &data, &size) && bs_class_parse(data, size, out) == BS_OK;
+    bs_arena_free(&a);
+    return ok;
+}
+
+static void class_line(const bs_class *k, char *out, size_t cap)
+{
+    snprintf(out, cap, "%s (%d)", k->class_name, k->level); /* (0xD6298) */
+}
+
 /* The existing classes (0x337EE): CLASSnnn.SCL, "Name (level)". */
 static void find_classes(creation *cr, const creation_env *env)
 {
     cr->class_count = 0;
     cr->class_selected = 0;
     cr->class_scroll = 0;
-    if (!env->vfs)
-        return;
     bs_arena a;
     bs_arena_init(&a, 0);
     static bs_class k;
-    for (int i = 0; i < 1000 && cr->class_count < CREATION_CLASSES; i++) {
+    for (int i = 0; i < CLASS_NUMBERS && cr->class_count < CREATION_CLASSES; i++) {
         creation_class_file *f = &cr->classes[cr->class_count];
-        snprintf(f->file, sizeof f->file, "GAMEDATA/CLASS%03d.SCL", i);
-        if (bs_vfs_exists(env->vfs, f->file) != BS_OK)
-            continue;
         uint8_t *data;
         size_t n;
         bs_arena_mark mark = bs_arena_get_mark(&a);
-        if (bs_vfs_read(env->vfs, f->file, &a, &data, &n) == BS_OK && bs_class_parse(data, n, &k) == BS_OK) {
-            snprintf(f->line, sizeof f->line, "%s (%d)", k.class_name, k.level);
+        if (class_file_read(env, i, &f->ours, &a, &data, &n) && bs_class_parse(data, n, &k) == BS_OK) {
+            f->number = i;
+            class_line(&k, f->line, sizeof f->line);
             cr->class_count++;
         }
         bs_arena_rewind(&a, mark);
@@ -439,7 +479,7 @@ static void open_editor(creation *cr, const creation_env *env, const bs_class *f
     cr->page = PAGE_MAIN;
     cr->skill_slot = -1;
     cr->naming_class = false;
-    cr->confirm = false;
+    cr->confirm = CONFIRM_NONE;
     cr->held = -1;
     go(cr, env, CREATION_EDITOR);
 }
@@ -647,6 +687,79 @@ static void open_page(creation *cr, const creation_env *env, creation_page p)
     }
 }
 
+/* ---- Save (0x3B39C) ---- */
+
+static void say_level(const creation_env *env, uint32_t id, int level)
+{
+    const char *f = env->text ? bs_exe_message(env->text, id) : NULL;
+    const char *d = f ? strstr(f, "%d") : NULL;
+    if (!d)
+        return;
+    char line[160];
+    snprintf(line, sizeof line, "%.*s%d%s", (int)(d - f), f, level, d + 2);
+    say(env, line);
+}
+
+/* Writes the class as class file n in our folder. */
+static void save_class(creation *cr, const creation_env *env, int n)
+{
+    int level = cr->c.cls.level > 0 ? cr->c.cls.level : 1;
+    say_level(env, MSG_SAVING, level);
+    bs_class_out who;
+    memset(&who, 0, sizeof who);
+    snprintf(who.name, sizeof who.name, "%s", cr->name);
+    who.female = cr->female;
+    who.race = (uint8_t)cr->race;
+    who.hair = (uint8_t)part_number(cr, 0);
+    who.eyes = (uint8_t)part_number(cr, 1);
+    who.mouth = (uint8_t)part_number(cr, 2);
+    uint8_t *data = NULL;
+    size_t size = 0;
+    char path[BS_PATH_MAX];
+    bool ok = our_class_path(env, n, path, sizeof path) && bs_fs_mkdirs(env->classes_dir) == BS_OK &&
+              bs_creation_write(&cr->c, &cr->shops[0], &cr->shops[1], cr->others, cr->other_count, &who, env->exe,
+                                env->exe_size, env->db, &data, &size) == BS_OK &&
+              bs_fs_write_file(path, data, size) == BS_OK;
+    free(data);
+    if (ok)
+        say_level(env, MSG_SAVED, level);
+    else
+        say(env, "The class could not be saved.");
+}
+
+/* Save: a class of the same name and level is replaced, if the player says so (0x3B42D, exist0.bsi); else the
+ * class takes the first number free, ours or the install's (0x3B51C). Ours stand in for the install's of the
+ * same number, which aren't changed. */
+static void save_click(creation *cr, const creation_env *env)
+{
+    if (!env->classes_dir || !env->exe) {
+        say(env, "The class can't be saved here.");
+        return;
+    }
+    char line[48];
+    class_line(&cr->c.cls, line, sizeof line);
+    find_classes(cr, env);
+    for (int i = 0; i < cr->class_count; i++)
+        if (strcmp(cr->classes[i].line, line) == 0) {
+            cr->overwrite = cr->classes[i].number;
+            cr->confirm = CONFIRM_OVERWRITE;
+            return;
+        }
+    int n = 0;
+    for (; n < CLASS_NUMBERS; n++) {
+        char path[BS_PATH_MAX], file[32];
+        snprintf(file, sizeof file, "GAMEDATA/CLASS%03d.SCL", n);
+        if (!(our_class_path(env, n, path, sizeof path) && bs_fs_is_file(path)) &&
+            !(env->vfs && bs_vfs_exists(env->vfs, file) == BS_OK))
+            break;
+    }
+    if (n == CLASS_NUMBERS) {
+        say(env, "The class could not be saved.");
+        return;
+    }
+    save_class(cr, env, n);
+}
+
 static creation_action editor_done(creation *cr, const creation_env *env)
 {
     switch (bs_creation_ready(&cr->c)) {
@@ -706,10 +819,10 @@ static creation_action editor_click(creation *cr, const creation_env *env, int x
             open_page(cr, env, PAGE_ADVANTAGES);
             break;
         case ED_SAVE:
-            say(env, "Saving classes is not available yet.");
+            save_click(cr, env);
             break;
         case ED_CANCEL:
-            cr->confirm = true;
+            cr->confirm = CONFIRM_CANCEL;
             break;
         case ED_DONE:
             return editor_done(cr, env);
@@ -969,24 +1082,22 @@ static creation_action screen_click(creation *cr, const creation_env *env, int x
             show_help(env, HELP_CLASS_LIST);
         if (take && cr->class_selected >= 0 && cr->class_selected < cr->class_count) {
             static bs_class k;
-            bs_arena a;
-            bs_arena_init(&a, 0);
-            uint8_t *data;
-            size_t n;
-            if (bs_vfs_read(env->vfs, cr->classes[cr->class_selected].file, &a, &data, &n) == BS_OK &&
-                bs_class_parse(data, n, &k) == BS_OK)
+            if (class_read(env, cr->classes[cr->class_selected].number, &k))
                 open_editor(cr, env, &k);
-            bs_arena_free(&a);
         }
         break;
     }
     case CREATION_EDITOR:
-        if (cr->confirm) {
+        if (cr->confirm != CONFIRM_NONE) {
+            creation_confirm was = cr->confirm;
             if (in(confirm_yes, x, y)) {
-                cr->confirm = false;
-                go(cr, env, CREATION_CLASS);
+                cr->confirm = CONFIRM_NONE;
+                if (was == CONFIRM_CANCEL)
+                    go(cr, env, CREATION_CLASS);
+                else
+                    save_class(cr, env, cr->overwrite);
             } else if (in(confirm_no, x, y)) {
-                cr->confirm = false;
+                cr->confirm = CONFIRM_NONE;
             }
             break;
         }
@@ -1126,11 +1237,11 @@ static creation_action key(creation *cr, const creation_env *env, SDL_Keycode k,
         }
         break;
     case CREATION_EDITOR:
-        if (cr->confirm) {
+        if (cr->confirm != CONFIRM_NONE) {
             if (k == SDLK_Y)
                 screen_click(cr, env, confirm_yes[0], confirm_yes[1], false);
             else if (k == SDLK_N || esc)
-                cr->confirm = false;
+                cr->confirm = CONFIRM_NONE;
         } else if (cr->skill_slot >= 0) {
             if (k == SDLK_UP || k == SDLK_DOWN) {
                 cr->list_selected += k == SDLK_UP ? -1 : 1;
@@ -1166,7 +1277,7 @@ static creation_action key(creation *cr, const creation_env *env, SDL_Keycode k,
             if (esc)
                 cr->page = PAGE_MAIN;
         } else if (esc) {
-            cr->confirm = true;
+            cr->confirm = CONFIRM_CANCEL;
         } else if (enter) {
             (void)shift;
             return editor_done(cr, env);
@@ -1270,7 +1381,8 @@ const char *creation_background(const creation *cr)
 
 const bs_item *creation_shown_item(const creation *cr, int r[4])
 {
-    if (cr->screen != CREATION_EDITOR || (cr->page != PAGE_EQUIPMENT && cr->page != PAGE_MAGIC) || cr->confirm)
+    if (cr->screen != CREATION_EDITOR || (cr->page != PAGE_EQUIPMENT && cr->page != PAGE_MAGIC) ||
+        cr->confirm != CONFIRM_NONE)
         return NULL;
     int s = cr->page == PAGE_MAGIC;
     if (cr->shop_at[s] >= cr->shops[s].count)
@@ -1571,8 +1683,9 @@ void creation_draw(const creation *cr, const creation_env *env, bs_overlay *o)
             image_at(o, bs_assets_image(env->assets, "plst00.bsi"), 0, PICKER_X, PICKER_Y);
             draw_list(cr, env, LIST_SKILLS, o);
         }
-        if (cr->confirm)
-            bs_overlay_image(o, bs_assets_image(env->assets, "sure00.bsi"), 0, 0);
+        if (cr->confirm != CONFIRM_NONE)
+            bs_overlay_image(
+                o, bs_assets_image(env->assets, cr->confirm == CONFIRM_CANCEL ? "sure00.bsi" : "exist0.bsi"), 0, 0);
         break;
     }
     default:

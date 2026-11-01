@@ -1084,6 +1084,128 @@ static void test_classes(void)
     bs_arena_free(&a);
 }
 
+/*
+ * Saving a class (bs_creation_write, as the CharacterMaker's Save, 0x3B39C): each shipped class, opened and saved
+ * again with nothing changed, reads back the same and has the same records, byte for byte where the game would
+ * write the same bytes.
+ */
+static size_t class_record(const uint8_t *f, size_t size, uint8_t type, uint32_t nth, const uint8_t **body)
+{
+    size_t p = 0;
+    uint32_t seen = 0;
+    while (p + 4 + BS_SAVE_HEADER <= size) {
+        uint32_t len = (uint32_t)f[p] | (uint32_t)f[p + 1] << 8 | (uint32_t)f[p + 2] << 16 | (uint32_t)f[p + 3] << 24;
+        if (len < BS_SAVE_HEADER || p + 4 + len > size)
+            break;
+        if (f[p + 4] == type && seen++ == nth) {
+            *body = f + p + 4 + BS_SAVE_HEADER;
+            return len - BS_SAVE_HEADER;
+        }
+        p += 4 + len;
+    }
+    return 0;
+}
+
+static void test_classes_saved(void)
+{
+    bs_assets *assets;
+    BS_CHECK_EQ_INT(bs_assets_open(&vfs, &assets), BS_OK);
+    bs_arena a;
+    bs_arena_init(&a, 0);
+    uint8_t *exe, *data;
+    size_t exe_size, n;
+    static bs_item_tables tables;
+    BS_CHECK_EQ_INT(bs_vfs_read(&vfs, "GAME.EXE", &a, &exe, &exe_size), BS_OK);
+    BS_CHECK_EQ_INT(bs_item_tables_read(exe, exe_size, &tables), BS_OK);
+    bs_magic_table mg[2];
+    static const char *const files[2] = {"MG0_GEN.TXT", "MG2_SPC.TXT"};
+    for (int i = 0; i < 2; i++) {
+        BS_CHECK_EQ_INT(bs_assets_read(assets, files[i], &a, &data, &n), BS_OK);
+        BS_CHECK_EQ_INT(bs_magic_parse(data, n, &a, &mg[i]), BS_OK);
+    }
+    bs_item_db db = {.tables = &tables, .magic = {&mg[0], &mg[1]}};
+
+    static bs_class c, back;
+    static bs_creation made;
+    int magic_items = 0;
+    static bs_creation_shop equipment, magic;
+    for (int i = 0; i < 18; i++) {
+        char path[48];
+        snprintf(path, sizeof path, "GAMEDATA/CLASS%03d.SCL", i);
+        BS_CHECK_EQ_INT(bs_vfs_read(&vfs, path, &a, &data, &n), BS_OK);
+        BS_CHECK_EQ_INT(bs_class_parse(data, n, &c), BS_OK);
+        /* As the CharacterMaker opens it: its items to the shops (made empty here). */
+        bs_creation_from_class(&made, &c);
+        memset(&equipment, 0, sizeof equipment);
+        memset(&magic, 0, sizeof magic);
+        magic.magic = true;
+        bs_item others[BS_SCL_MAX_ITEMS];
+        uint32_t other_count = bs_creation_class_items(&c, true, &equipment, &magic, others, BS_SCL_MAX_ITEMS);
+        bs_class_out who = {.female = true, .race = 1, .hair = 13, .eyes = 5, .mouth = 6};
+        uint8_t *out;
+        size_t size;
+        BS_CHECK_EQ_INT(bs_creation_write(&made, &equipment, &magic, others, other_count, &who, exe, exe_size, &db,
+                                          &out, &size),
+                        BS_OK);
+        BS_CHECK_EQ_INT(bs_class_parse(out, size, &back), BS_OK);
+        /* The class's fields. */
+        BS_CHECK(strcmp(back.class_name, c.class_name) == 0 && back.level == c.level &&
+                 back.points_left == c.points_left);
+        BS_CHECK(memcmp(back.attributes, c.attributes, sizeof c.attributes) == 0 && back.wounds == c.wounds);
+        BS_CHECK(memcmp(back.skills, c.skills, sizeof c.skills) == 0);
+        BS_CHECK(memcmp(back.class_skills, c.class_skills, sizeof c.class_skills) == 0);
+        BS_CHECK(back.resists == c.resists && back.immune == c.immune && back.magery == c.magery &&
+                 back.low_tolerance == c.low_tolerance && back.critical_weakness == c.critical_weakness);
+        BS_CHECK(back.acute_hearing == c.acute_hearing && back.spell_absorption == c.spell_absorption &&
+                 back.rapid_healing == c.rapid_healing && back.regenerate_health == c.regenerate_health &&
+                 back.regenerate_sp == c.regenerate_sp && back.athleticism == c.athleticism &&
+                 back.adrenaline_rush == c.adrenaline_rush && back.no_sp_regen == c.no_sp_regen);
+        BS_CHECK(back.forbidden_weapons == c.forbidden_weapons && back.max_armour == c.max_armour &&
+                 back.forbidden_shield == c.forbidden_shield && back.max_material == c.max_material);
+        /* The player record: what the class uses and the character, as the game's. */
+        const uint8_t *pb, *qb;
+        BS_CHECK(class_record(data, n, BS_SAVE_PLAYER, 0, &pb) >= 0x2E2);
+        BS_CHECK_EQ_INT((int)class_record(out, size, BS_SAVE_PLAYER, 0, &qb), BS_SAVE_PLAYER_BODY);
+        BS_CHECK(memcmp(pb + 0x20, qb + 0x20, 0x16E - 0x20) == 0); /* attributes, points, wounds, skills */
+        BS_CHECK(memcmp(pb + 0x17A, qb + 0x17A, 0x38) == 0);         /* the class's fields */
+        BS_CHECK(memcmp(pb + 0x23E, qb + 0x23E, 3) == 0 && (qb[0x226] & 8));
+        /* The spells: the class file's records again. */
+        BS_CHECK_EQ_INT(back.spell_count, c.spell_count);
+        for (uint32_t k = 0; k < c.spell_count; k++) {
+            BS_CHECK(class_record(data, n, BS_SAVE_SPELL, k, &pb) == BS_SPELL_RECORD &&
+                     class_record(out, size, BS_SAVE_SPELL, k, &qb) == BS_SPELL_RECORD);
+            /* All but +0x4F, the caster, set when it's cast. */
+            BS_CHECK(memcmp(pb, qb, 0x4F) == 0 && memcmp(pb + 0x53, qb + 0x53, BS_SPELL_RECORD - 0x53) == 0);
+        }
+        /* The items: bought (0x10), in the order the game copies them back (equipment, then magic items). */
+        BS_CHECK_EQ_INT(back.item_count, c.item_count);
+        for (uint32_t k = 0; k < back.item_count; k++) {
+            const bs_scl_item *it = &back.items[k];
+            BS_CHECK(it->flags == 0x10);
+            bool found = false;
+            for (uint32_t j = 0; j < c.item_count && !found; j++) {
+                const bs_scl_item *o = &c.items[j];
+                found = o->base == it->base && o->material == it->material && o->magic == it->magic &&
+                        o->number == it->number && o->quantity == it->quantity && o->condition == it->condition &&
+                        o->condition_max == it->condition_max && o->charges == it->charges &&
+                        o->charges_max == it->charges_max && o->container == it->container;
+                if (found && it->magic) {
+                    /* The enchantment (+0xB3 .. +0x2E6) as the game holds it. */
+                    BS_CHECK(class_record(data, n, BS_SAVE_ITEM, j, &pb) == BS_SAVE_ITEM_BODY &&
+                             class_record(out, size, BS_SAVE_ITEM, k, &qb) == BS_SAVE_ITEM_BODY);
+                    BS_CHECK(memcmp(pb + 0xB3, qb + 0xB3, BS_MAGIC_RECORD) == 0);
+                    magic_items++;
+                }
+            }
+            BS_CHECK(found);
+        }
+        free(out);
+    }
+    BS_CHECK_EQ_INT(magic_items, 23);
+    bs_arena_free(&a);
+    bs_assets_close(assets);
+}
+
 /* A level file from the install, for bs_level_spaces_build. */
 static bs_result read_level(void *ctx, const char *file, bs_arena *a, bs_bs6_level *out)
 {
@@ -1509,6 +1631,7 @@ int main(void)
     BS_RUN(test_items);
     BS_RUN(test_creatures);
     BS_RUN(test_classes);
+    BS_RUN(test_classes_saved);
     BS_RUN(test_saves);
     BS_RUN(test_dialogue_tables);
     BS_RUN(test_all_sounds);

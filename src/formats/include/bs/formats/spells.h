@@ -117,6 +117,13 @@ typedef struct bs_spell {
 /* One spell record (the table's, or a spell object's body in a class or save file); skill is left -1. */
 void bs_spell_parse(const uint8_t r[BS_SPELL_RECORD], bs_spell *s);
 
+/* Writes a spell's fields into a record (the rest of r is left as it is: start from the table's record, which
+ * has bytes bs_spell doesn't keep). The name is NUL-padded to 32 bytes. */
+void bs_spell_write(const bs_spell *s, uint8_t r[BS_SPELL_RECORD]);
+
+/* The spell table in GAME.EXE's bytes (BS_SPELL_COUNT records, spell n + 1 at n x BS_SPELL_RECORD), or NULL. */
+const uint8_t *bs_spell_table(const uint8_t *exe, size_t size);
+
 /* Reads the 31 spells from GAME.EXE's bytes. BS_ERR_NOT_FOUND if they aren't there. */
 bs_result bs_spells_read(const uint8_t *exe, size_t size, bs_spell out[BS_SPELL_COUNT]);
 

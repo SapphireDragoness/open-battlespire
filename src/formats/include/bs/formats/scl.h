@@ -63,6 +63,33 @@ typedef struct bs_class {
     uint32_t item_count;
 } bs_class;
 
+/*
+ * Writing a class file, as the CharacterMaker's Save does (0x3B39C): the player object and everything under it
+ * (0x2FB80), so the player's record, then a record per spell, an automap (40 x 30, nothing seen) and a record
+ * per item, each with the player (50000) as its parent and an id of its own (1 << 16 | n, from 10000). There's
+ * no version and no end record.
+ *
+ * The player's body is the whole player record: a new class's start (0x3B273: every attribute 50, every skill
+ * 5, with effects as well as base) with the class's fields over it, and the character who made it: name, sex,
+ * race and face. Its header's +0x29 is the clock when saved (0x3B4EE); the base copies of the class's fields
+ * (+0x1B2) are the fields.
+ */
+typedef struct bs_class_out {
+    const bs_class *cls;              /* its spells and items aren't used: they're below */
+    char name[32];                    /* the character's */
+    bool female;
+    uint8_t race, hair, eyes, mouth;
+    uint32_t clock;
+    const uint8_t (*spells)[BS_SPELL_RECORD];
+    uint32_t spell_count;
+    const uint8_t (*items)[0x2F3];    /* bodies (BS_SAVE_ITEM_BODY) */
+    const uint8_t *item_flags;        /* the header's +0x14: 0x10 bought with the class */
+    uint32_t item_count;
+} bs_class_out;
+
+/* The file's bytes (malloc'd). */
+bs_result bs_class_write(const bs_class_out *in, uint8_t **out, size_t *size);
+
 /* Reads a class file. */
 bs_result bs_class_parse(const uint8_t *data, size_t size, bs_class *out);
 

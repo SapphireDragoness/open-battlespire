@@ -94,6 +94,48 @@ static void test_magic(void)
     BS_CHECK_EQ_INT(t.count, 0);
 }
 
+static int32_t le32(const uint8_t *p)
+{
+    return (int32_t)((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24);
+}
+
+/* An enchantment as the game holds it (0x52EE1). */
+static void test_magic_record(void)
+{
+    uint8_t r[BS_MAGIC_RECORD];
+    const bs_magic *m = bs_magic_find(&magic, 7001);
+    BS_CHECK(m != NULL);
+    if (!m)
+        return;
+    bs_magic_record(m, r);
+    BS_CHECK(memcmp(r, "of the Test", 12) == 0);
+    BS_CHECK(r[0x20] == 0 && r[0x21] == 2);
+    BS_CHECK_EQ_INT(le32(r + 0xBA + 12 * 15), 30);                    /* App 15, 30 */
+    BS_CHECK_EQ_INT(r[BS_MAGIC_ADV + 0x29], 1);                       /* Adv 36 then 37: light armour */
+    BS_CHECK(r[0x21A] == 0xFF && r[0x21B] == 28 && r[0x21C] == 0xFF && r[0x21D] == 8 && r[0x21E] == 4);
+    BS_CHECK(le32(r + 0x21F) == 10 && le32(r + 0x223) == 10 && le32(r + 0x22F) == 7001);
+
+    /* The name less one character at each end; Adv's flags, with only the first number's sign read. */
+    static const char text[] = "Name\t\"\"SCOURGE\"\"\r\n"
+                               "ID#\t2017\r\nItem\t1\r\nSpell\t-1, -1, -1, -1, -1\r\nApp\t100\r\n"
+                               "Adv\t9, 13, 20, 26, -31, 40, 46, -1, 19\r\nUses\t5\r\nLevel\t3\r\n";
+    bs_magic_table t;
+    BS_CHECK_EQ_INT(bs_magic_parse((const uint8_t *)text, sizeof text - 1, &arena, &t), BS_OK);
+    BS_CHECK(t.count == 1 && strcmp(t.records[0].name, "SCOURGE") == 0);
+    if (t.count != 1)
+        return;
+    bs_magic_record(&t.records[0], r);
+    BS_CHECK(memcmp(r, "\"SCOURGE\"", 10) == 0 && r[0x20] == 3 && r[0x21] == 1);
+    const uint8_t *adv = r + BS_MAGIC_ADV;
+    BS_CHECK_EQ_INT(adv[0x18], 1 | 16);          /* resist magic and poison */
+    BS_CHECK_EQ_INT(adv[0x1B], 1);               /* Spell Absorption */
+    BS_CHECK_EQ_INT(le32(adv + 0x20), 0x180);    /* magery x 1.5 */
+    BS_CHECK_EQ_INT(adv[0x28], 1);               /* -31 read as 31: no short blades */
+    BS_CHECK_EQ_INT(adv[0x2B], 8);               /* 40: Orcish at best */
+    BS_CHECK_EQ_INT(adv[0x26], 1);               /* critical weakness to magic */
+    BS_CHECK_EQ_INT(adv[0x1A], 1);               /* a later -1 is read as 1 and doesn't end it: 19, Acute Hearing */
+}
+
 static void test_material(void)
 {
     BS_CHECK_EQ_INT(bs_item_material_for_roll(-50), 0);
@@ -481,6 +523,7 @@ int main(void)
     setup();
     BS_RUN(test_tables);
     BS_RUN(test_magic);
+    BS_RUN(test_magic_record);
     BS_RUN(test_material);
     BS_RUN(test_make);
     BS_RUN(test_name);

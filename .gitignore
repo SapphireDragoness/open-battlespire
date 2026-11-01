@@ -31,3 +31,5 @@ bsview_*.png
 docs/
 screenshots/
 wiki/
+# Release packages (packaging/*.sh)
+/dist/

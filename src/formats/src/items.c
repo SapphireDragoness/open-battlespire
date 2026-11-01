@@ -227,6 +227,12 @@ static bs_result parse_field(span key, span val, bs_magic *m, unsigned *seen)
     int n;
     if (key_is(key, "Name")) {
         *seen |= F_NAME;
+        /* The game's copy skips the first character and drops the last (0x52F40): the quotes, usually. */
+        size_t k = val.n >= 2 ? val.n - 2 : 0;
+        if (k >= sizeof m->record_name)
+            return BS_ERR_FORMAT;
+        memcpy(m->record_name, val.p + (val.n >= 2), k);
+        m->record_name[k] = '\0';
         return parse_name(val, m->name, sizeof m->name) ? BS_OK : BS_ERR_FORMAT;
     } else if (key_is(key, "ID#")) {
         *seen |= F_ID;
@@ -305,6 +311,67 @@ bs_result bs_magic_parse(const uint8_t *text, size_t size, bs_arena *arena, bs_m
     out->records = recs;
     out->count = count;
     return BS_OK;
+}
+
+static void put32(uint8_t *p, int32_t v)
+{
+    for (int k = 0; k < 4; k++)
+        p[k] = (uint8_t)((uint32_t)v >> (8 * k));
+}
+
+/* An Adv number's effect (0x53299), on the fields laid out as the player record's from +0x17A (class.at). */
+static void magic_adv(uint8_t *at, int32_t v)
+{
+    static const int32_t magery[4] = {0x100, 0x180, 0x200, 0x300}; /* 0xEFDED, by v */
+    if (v >= 9 && v <= 13)
+        at[0x18] |= (uint8_t)(1u << (v - 9));         /* resistance */
+    else if (v >= 14 && v <= 18)
+        at[0x19] |= (uint8_t)(1u << (v - 14));        /* immunity */
+    else if (v >= 19 && v <= 24)
+        at[0x1A + (v - 19)] = 1;                      /* Acute Hearing .. Athleticism */
+    else if (v >= 25 && v <= 28)
+        put32(at + 0x20, magery[v - 25]);
+    else if (v == 29)
+        at[0x24] = 1;                                 /* Adrenaline Rush */
+    else if (v == 30)
+        at[0x27] = 1;                                 /* no spell point regeneration */
+    else if (v >= 31 && v <= 35)
+        at[0x28] |= (uint8_t)(1u << (v - 31));        /* forbidden weapons */
+    else if (v >= 36 && v <= 38)
+        at[0x29] = (uint8_t)(v - 36);                 /* heaviest armour */
+    else if (v == 39)
+        at[0x2A] = 1;                                 /* no shield */
+    else if (v == 40)
+        at[0x2B] = 8;                                 /* best material */
+    else if (v >= 41 && v <= 45)
+        at[0x25] |= (uint8_t)(1u << (v - 41));        /* low tolerance */
+    else if (v >= 46 && v <= 50)
+        at[0x26] |= (uint8_t)(1u << (v - 46));        /* critical weakness */
+}
+
+void bs_magic_record(const bs_magic *m, uint8_t out[BS_MAGIC_RECORD])
+{
+    memset(out, 0, BS_MAGIC_RECORD);
+    for (size_t n = 0; n < 32 && m->record_name[n]; n++)
+        out[n] = (uint8_t)m->record_name[n];
+    out[0x20] = (uint8_t)m->level;
+    out[0x21] = (uint8_t)m->item;
+    /* App: pairs of a field and its value, to a 100 (0x531DD). */
+    for (uint32_t i = 0; i + 1 < m->app_count && m->app[i] != 100; i += 2)
+        if (m->app[i] >= 0 && 0xBA + 12 * m->app[i] + 4 <= BS_MAGIC_RECORD)
+            put32(out + 0xBA + 12 * m->app[i], m->app[i + 1]);
+    /* Adv: to a -1, but only the first number's sign is read: later ones skip the '-' (0x53142). */
+    for (uint32_t i = 0; i < m->adv_count; i++) {
+        int32_t v = i == 0 ? m->adv[i] : abs(m->adv[i]);
+        if (v == -1)
+            break;
+        magic_adv(out + BS_MAGIC_ADV, v);
+    }
+    for (int k = 0; k < 5; k++)
+        out[0x21A + k] = (uint8_t)m->spell[k];
+    put32(out + 0x21F, m->uses);
+    put32(out + 0x223, m->uses);
+    put32(out + 0x22F, m->id);
 }
 
 const bs_magic *bs_magic_find(const bs_magic_table *t, int32_t id)

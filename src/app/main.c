@@ -356,6 +356,9 @@ typedef struct game {
     /* Saved games (loadsave.c). */
     loadsave loadsave;
     char saves_dir[BS_PATH_MAX];  /* ours; "" until needed */
+    char classes_dir[BS_PATH_MAX];  /* the CharacterMaker's saved classes: saves_dir/classes */
+    const uint8_t *exe;           /* GAME.EXE's bytes (in arena), or NULL */
+    size_t exe_size;
     uint8_t save_picture[BS_SAVE_IMAGE_SIZE];
     bool picture_pending;         /* Save was chosen: the next frame drawn is the save's picture */
     uint8_t seen[BS_AUTOMAP_MAPS][AUTOMAP_COLS * AUTOMAP_ROWS];   /* the automaps' cells seen */
@@ -390,7 +393,7 @@ static void usage(FILE *out)
             "  --spells LIST       with --level: spells known at the start: numbers, or all\n"
             "  --load SAVE         start from a saved game: the original game's slot 0-9 (the install's\n"
             "                      SAVE0-SAVE9), an original save folder, or one of ours (GAME.BSS)\n"
-            "  --saves DIR         where our saved games go (default: the user's data folder)\n"
+            "  --saves DIR         where our saved games and classes go (default: the user's data folder)\n"
             "  --give LIST         with --level: items carried, by base item number, e.g. 9,22,2,24\n"
             "                      for a long bow, arrows, a long sword and a helmet: the first weapon\n"
             "                      is wielded, the next is the secondary, the rest worn (for testing)\n"
@@ -2965,6 +2968,12 @@ static creation_env creation_env_of(game *g)
     e.help = &g->menus;
     e.save_root = g->inst.root;
     e.saves_dir = saves_dir(g);
+    if (e.saves_dir && !g->classes_dir[0] &&
+        !bs_path_join(g->classes_dir, sizeof g->classes_dir, e.saves_dir, "classes"))
+        g->classes_dir[0] = '\0';
+    e.classes_dir = g->classes_dir[0] ? g->classes_dir : NULL;
+    e.exe = g->exe;
+    e.exe_size = g->exe_size;
     e.ctx = g;
     e.message = creation_message;
     e.sound = creation_sound;
@@ -4378,6 +4387,8 @@ static void load_text_and_items(game *g)
     }
     const uint8_t *data_exe = data;
     size_t size_exe = size;
+    g->exe = data;
+    g->exe_size = size;
     bool loaded = bs_le_load(data, size, &g->arena, &img) == BS_OK;
     if (!loaded || bs_exe_text_read(&img, &g->arena, &g->text) != BS_OK)
         BS_WARN("no messages in GAME.EXE");

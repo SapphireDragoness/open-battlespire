@@ -11,6 +11,12 @@ static int32_t i32(const uint8_t *p)
     return (int32_t)((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24);
 }
 
+static void put32(uint8_t *p, int32_t v)
+{
+    for (int k = 0; k < 4; k++)
+        p[k] = (uint8_t)((uint32_t)v >> (8 * k));
+}
+
 void bs_spell_parse(const uint8_t r[BS_SPELL_RECORD], bs_spell *s)
 {
     memset(s, 0, sizeof *s);
@@ -37,14 +43,46 @@ void bs_spell_parse(const uint8_t r[BS_SPELL_RECORD], bs_spell *s)
     s->skill = -1;
 }
 
-bs_result bs_spells_read(const uint8_t *exe, size_t size, bs_spell out[BS_SPELL_COUNT])
+void bs_spell_write(const bs_spell *s, uint8_t r[BS_SPELL_RECORD])
+{
+    memset(r, 0, 32);
+    for (size_t n = 0; n < sizeof s->name - 1 && s->name[n]; n++)
+        r[n] = (uint8_t)s->name[n];
+    r[0x20] = s->effect;
+    r[0x21] = s->target;
+    r[0x22] = s->icon;
+    put32(r + 0x23, s->duration_base);
+    put32(r + 0x27, s->duration_increase);
+    put32(r + 0x2B, s->duration_step);
+    put32(r + 0x2F, s->magnitude_min);
+    put32(r + 0x33, s->magnitude_max);
+    put32(r + 0x37, s->increase_min);
+    put32(r + 0x3B, s->increase_max);
+    put32(r + 0x3F, s->magnitude_step);
+    r[0x4D] = s->element;
+    r[0x4E] = s->delivery;
+    put32(r + 0x5F, s->cost);
+    put32(r + 0x67, s->school);
+    put32(r + 0x6B, s->detonation);
+}
+
+const uint8_t *bs_spell_table(const uint8_t *exe, size_t size)
 {
     static const char first[] = "Monster Summoning", second[] = "Detect Spell";
     const size_t need = (size_t)BS_SPELL_COUNT * RECORD;
     for (size_t off = 0; off + need <= size; off++) {
         const uint8_t *t = exe + off;
-        if (memcmp(t, first, sizeof first) != 0 || memcmp(t + RECORD, second, sizeof second) != 0)
-            continue;
+        if (memcmp(t, first, sizeof first) == 0 && memcmp(t + RECORD, second, sizeof second) == 0)
+            return t;
+    }
+    return NULL;
+}
+
+bs_result bs_spells_read(const uint8_t *exe, size_t size, bs_spell out[BS_SPELL_COUNT])
+{
+    const uint8_t *t = bs_spell_table(exe, size);
+    if (t) {
+        size_t off = (size_t)(t - exe);
         for (uint32_t i = 0; i < BS_SPELL_COUNT; i++) {
             const uint8_t *r = t + i * RECORD;
             bs_spell *s = &out[i];
