@@ -1,0 +1,78 @@
+name: Release builds
+
+# Publishing a GitHub release builds the Windows zip and the Linux AppImage
+# and attaches them to it. "Run workflow" on the Actions tab builds them
+# without a release; download them from the run's artifacts.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  SDL_VERSION: 3.4.18
+  VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || format('dev-{0}', github.sha) }}
+
+jobs:
+  windows:
+    name: Windows (x64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 ninja-build zip
+
+      - name: Build
+        run: packaging/build-windows.sh "$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+          if-no-files-found: error
+
+  linux:
+    name: Linux AppImage (x86_64)
+    runs-on: ubuntu-latest
+    # Built on Ubuntu 22.04 so the AppImage runs on distributions with glibc 2.35 or newer.
+    container: ubuntu:22.04
+    steps:
+      - name: Install build dependencies
+        # Before checkout so it can use git and keep the history.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v4
+
+      - name: Install SDL3 build dependencies
+        run: packaging/linux/install-build-deps.sh
+
+      - name: Build and test
+        run: packaging/build-appimage.sh "$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+  publish:
+    name: Attach to release
+    if: github.event_name == 'release'
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$VERSION" dist/* --clobber --repo "$GITHUB_REPOSITORY"

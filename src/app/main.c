@@ -21,11 +21,21 @@
  */
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <SDL3/SDL.h>
+/* On Windows, SDL_main.h supplies WinMain (the game is a GUI program there), which it doesn't declare first. */
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-prototypes"
+#endif
+#include <SDL3/SDL_main.h>
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 #include "bs/assets/assets.h"
 #include "bs/audio/audio.h"
@@ -65,7 +75,9 @@
 #include "creation.h"
 #include "fight.h"
 #include "inventory.h"
+#include "launcher.h"
 #include "loadsave.h"
+#include "platform.h"
 #include "spellbook.h"
 #include "talk.h"
 #include "menus.h"
@@ -356,6 +368,7 @@ typedef struct game {
     /* Saved games (loadsave.c). */
     loadsave loadsave;
     char saves_dir[BS_PATH_MAX];  /* ours; "" until needed */
+    char data_dir[BS_PATH_MAX];   /* the Battlespire folder chosen on the startup screen (settings.ini) */
     char classes_dir[BS_PATH_MAX];  /* the CharacterMaker's saved classes: saves_dir/classes */
     const uint8_t *exe;           /* GAME.EXE's bytes (in arena), or NULL */
     size_t exe_size;
@@ -375,6 +388,8 @@ static void usage(FILE *out)
 {
     fprintf(out,
             "usage: openbattlespire [-d install-dir] [options]\n"
+            "  -d, --data DIR      the Battlespire installation (default: BS_DATA_DIR; without either,\n"
+            "                      a startup screen asks for it and remembers it)\n"
             "  --no-intro          skip the intro video\n"
             "  --level NAME        go straight into a level, e.g. l1.bs6\n"
             "  --mute              no sound\n"
@@ -2791,7 +2806,7 @@ static const char *saves_dir(game *g);
 
 /* What the game keeps in screen.dat (0x2EEFD: the view size, the resolution, the help pop-ups) and
  * controls.dat (0x1F757: the keys, the mouse), with the turn rate and the movement, ours in settings.ini in
- * the user's data folder. */
+ * the user's data folder, with the Battlespire folder chosen on the startup screen. */
 static bool settings_path(char *out, size_t cap)
 {
     char *pref = SDL_GetPrefPath("OpenBattlespire", "OpenBattlespire");
@@ -2825,6 +2840,11 @@ static void load_settings(game *g, bool keep_keys)
                 }
                 g->keys = c;
             }
+            if (strcmp(ini.sections[i].name, "data") == 0) {
+                const char *v = bs_ini_get(&ini.sections[i], "dir");
+                if (v)
+                    snprintf(g->data_dir, sizeof g->data_dir, "%s", v);
+            }
             if (strcmp(ini.sections[i].name, "screen") != 0)
                 continue;
             const char *v;
@@ -2855,6 +2875,10 @@ static void save_settings(game *g)
                g->menus.low_resolution ? "yes" : "no");
     bs_ini_put(&w, "help_popups", NULL, "%s", g->menus.auto_help ? "yes" : "no");
     controls_write(&g->keys, &w);
+    if (g->data_dir[0]) {
+        bs_ini_section_begin(&w, "data");
+        bs_ini_put_str(&w, "dir", g->data_dir);
+    }
     if (w.failed || bs_fs_write_file(path, w.text, w.len) != BS_OK)
         BS_WARN("%s: not saved", path);
     bs_ini_writer_free(&w);
@@ -4513,15 +4537,31 @@ static void load_text_and_items(game *g)
     g->rng.state = (uint32_t)SDL_GetTicksNS() | 1u;
 }
 
+/* Says what went wrong on stderr and, as the game may have been started from a desktop with no terminal to
+ * show it, in a message box. */
+static void fatal(SDL_Window *window, const char *fmt, ...) BS_PRINTF_FMT(2, 3);
+static void fatal(SDL_Window *window, const char *fmt, ...)
+{
+    char msg[BS_PATH_MAX + 256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "openbattlespire: %s\n", msg);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "OpenBattlespire", msg, window);
+}
+
 static bool open_data(game *g, const char *dir)
 {
     if (bs_install_detect(dir, &g->inst) != BS_OK) {
-        fprintf(stderr, "openbattlespire: '%s' is not a Battlespire installation\n", dir);
+        fatal(g->window, "'%s' is not a Battlespire installation (GAME.EXE and GAMEDATA aren't in it).", dir);
         return false;
     }
     bs_vfs_init(&g->vfs);
-    if (bs_install_mount(&g->inst, &g->vfs, &g->cd) != BS_OK || bs_assets_open(&g->vfs, &g->assets) != BS_OK)
+    if (bs_install_mount(&g->inst, &g->vfs, &g->cd) != BS_OK || bs_assets_open(&g->vfs, &g->assets) != BS_OK) {
+        fatal(g->window, "Cannot open the game's files in '%s'.", dir);
         return false;
+    }
     uint8_t *text;
     size_t size;
     if (bs_vfs_read(&g->vfs, "GAMEDATA/LEVELS.TXT", &g->arena, &text, &size) != BS_OK ||
@@ -4563,12 +4603,11 @@ static bs_gl_proc gl_loader(const char *name)
 
 int main(int argc, char **argv)
 {
+    platform_attach_console();
     options o;
     bool help;
     bool parsed = parse_args(argc, argv, &o, &help);
-    if (help || !parsed || !o.data_dir) {
-        if (!help && !o.data_dir)
-            fprintf(stderr, "openbattlespire: no install directory; use -d <dir> or set BS_DATA_DIR\n\n");
+    if (help || !parsed) {
         usage(help ? stdout : stderr);
         return help ? 0 : 2;
     }
@@ -4589,7 +4628,54 @@ int main(int argc, char **argv)
     g.monsters_on = !o.no_monsters;
     if (o.saves)
         snprintf(g.saves_dir, sizeof g.saves_dir, "%s", o.saves);
-    if (!open_data(&g, o.data_dir))
+
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        fatal(NULL, "SDL_Init: %s", SDL_GetError());
+        return 1;
+    }
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    g.window = SDL_CreateWindow("OpenBattlespire", o.width, o.height, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    SDL_GLContext ctx = g.window ? SDL_GL_CreateContext(g.window) : NULL;
+    const char *missing;
+    if (!ctx || !bs_gl_load(gl_loader, &missing) || bs_screen_create(&g.screen) != BS_OK) {
+        fatal(g.window, "Cannot create an OpenGL 3.3 context: %s", ctx ? missing : SDL_GetError());
+        return 1;
+    }
+    if (bs_overlay_create(&g.overlay) != BS_OK)
+        BS_WARN("no overlay: messages won't show");
+    SDL_GL_SetSwapInterval(1);
+
+    g.settings = bs_render_settings_default();
+    g.cam.fov_y = 53.13f * SDL_PI_F / 180.0f; /* the game's at 640x480 (RE: 0x10F5C) */
+    controls_set(&g.keys, o.original_keys);
+    load_settings(&g, o.keys_given);
+    apply_controls(&g);
+
+    /* The Battlespire folder: -d or BS_DATA_DIR, else the startup screen's (which shows the last one). */
+    const char *data_dir = o.data_dir;
+    if (!data_dir) {
+        char dir[BS_PATH_MAX];
+        snprintf(dir, sizeof dir, "%s", g.data_dir);
+        launcher_testing testing = {o.screenshot, SCREENSHOT_MS, save_screenshot};
+        if (!launcher_run(g.window, g.screen, dir, sizeof dir, &testing)) {
+            bs_overlay_destroy(g.overlay);
+            bs_screen_destroy(g.screen);
+            SDL_GL_DestroyContext(ctx);
+            SDL_DestroyWindow(g.window);
+            SDL_Quit();
+            return 0;
+        }
+        if (strcmp(dir, g.data_dir) != 0) {
+            snprintf(g.data_dir, sizeof g.data_dir, "%s", dir);
+            save_settings(&g);
+        }
+        data_dir = g.data_dir;
+    }
+    if (!open_data(&g, data_dir))
         return 1;
     /* Spells known from the start, for --level (Single Player makes the character). */
     for (const char *p = o.spells; p && *p && g.have_spells;) {
@@ -4607,36 +4693,10 @@ int main(int argc, char **argv)
 
     give_items(&g, o.give);
 
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        fprintf(stderr, "openbattlespire: SDL_Init: %s\n", SDL_GetError());
-        return 1;
-    }
     if (!o.mute && (!SDL_InitSubSystem(SDL_INIT_AUDIO) || bs_audio_open(&g.audio) != BS_OK)) {
         BS_WARN("no audio device: running silent");
         g.audio = NULL;
     }
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    g.window = SDL_CreateWindow("OpenBattlespire", o.width, o.height, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-    SDL_GLContext ctx = g.window ? SDL_GL_CreateContext(g.window) : NULL;
-    const char *missing;
-    if (!ctx || !bs_gl_load(gl_loader, &missing) || bs_screen_create(&g.screen) != BS_OK) {
-        fprintf(stderr, "openbattlespire: cannot create an OpenGL 3.3 context: %s\n",
-                ctx ? missing : SDL_GetError());
-        return 1;
-    }
-    if (bs_overlay_create(&g.overlay) != BS_OK)
-        BS_WARN("no overlay: messages won't show");
-    SDL_GL_SetSwapInterval(1);
-
-    g.settings = bs_render_settings_default();
-    g.cam.fov_y = 53.13f * SDL_PI_F / 180.0f; /* the game's at 640x480 (RE: 0x10F5C) */
-    controls_set(&g.keys, o.original_keys);
-    load_settings(&g, o.keys_given);
-    apply_controls(&g);
     bs_level_audio_open(&g.level_audio, g.audio, &g.vfs);
     g.level_audio.fixed_ambience = o.fixed_ambience;
     g.level_audio.locate = sound_source;

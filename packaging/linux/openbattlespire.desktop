@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=OpenBattlespire
+Comment=Open-source reimplementation of the Battlespire engine
+Exec=openbattlespire
+Icon=openbattlespire
+Terminal=false
+Categories=Game;RolePlaying;

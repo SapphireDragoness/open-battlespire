@@ -27,7 +27,10 @@ ctest --preset debug          # data tests are skipped when BS_DATA_DIR is unset
 
 ## The game
 
-`openbattlespire` runs the start-up sequence: the
+`openbattlespire` first asks where Battlespire is installed: Browse to the
+folder (or type, paste or drop it), and Play. It remembers the folder in
+`settings.ini` in your data folder; `-d DIR` or `BS_DATA_DIR` skip the
+question. Then it runs the start-up sequence: the
 intro video (any key skips it), the title menu with its music, and Single
 Player (or Enter). Load Saved Game shows your saves, and on a second page
 (Page Down) the original game's ten slots (`SAVE0`–`SAVE9` in the install),
