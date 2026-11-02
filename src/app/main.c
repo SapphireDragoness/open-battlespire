@@ -119,6 +119,7 @@
 #define MESSAGE_LEN 80
 #define MESSAGE_MS 10000
 #define MESSAGE_TOP 5
+#define FPS_PERIOD_NS 500000000ull /* the frame rate counter is measured over half a second */
 #define MESSAGE_WRAP 600     /* TEXT.RSC messages are wrapped to this width (0x4DBF2) */
 #define VIDEO_TEXT_BOTTOM 470  /* a game over's text ends here, over its video (0x1ED57) */
 #define VIDEO_SKIP_FRAMES 10   /* a video can be skipped after this many frames (0x1ECD1, 0x1EE8C) */
@@ -378,6 +379,14 @@ typedef struct game {
     const char *skill_names[BS_SKILL_COUNT], *attribute_names[8];
     bool have_fonts;
     bool overlay_dirty;
+    /* The frame rate counter in the screen's top right corner, Ctrl+F or Alt+F (not in the original). */
+    struct {
+        bs_overlay *layer;       /* its own layer: the game's is not drawn again every frame */
+        bool on;
+        bool eat_text;           /* the toggle's F may come again as text input: dropped */
+        uint32_t frames;         /* since since_ns */
+        uint64_t since_ns;
+    } fps;
     struct {
         char text[MESSAGE_LEN];
         uint64_t at_ms;
@@ -452,7 +461,8 @@ static void usage(FILE *out)
             "            Space + mouse back duck, A switch weapon, PgUp/PgDn up/down, F10 inventory,\n"
             "            D leave a boat\n"
             "  both:     L lantern, F fly (Shift faster), G classic/enhanced rendering, M sound,\n"
-            "            Esc options (End Game goes back to the title)\n");
+            "            Esc options (End Game goes back to the title)\n"
+            "  anywhere: Ctrl+F or Alt+F shows or hides the frame rate (top right)\n");
 }
 
 static bool parse_args(int argc, char **argv, options *o, bool *help)
@@ -4107,10 +4117,68 @@ static void draw_creation(game *g, int w, int h)
     bs_overlay_draw(g->overlay, w, h);
 }
 
+/* ---- frame rate counter ---- */
+
+/* Draws text right-aligned in the counter's layer, in place of what was there. */
+static void fps_show(game *g, const char *text)
+{
+    bs_overlay *o = g->fps.layer;
+    bs_overlay_clear(o);
+    int w = bs_text_width(&g->font, text), lh = bs_text_height(&g->font);
+    int x = BS_OVERLAY_WIDTH - 6 - w, y = MESSAGE_TOP;
+    bs_overlay_fill(o, x - 4, y - 1, w + 8, lh + 2, 0x00000080);
+    bs_overlay_text(o, &g->shadow_font, x + 2, y + 2, text);
+    bs_overlay_text(o, &g->font, x, y, text);
+}
+
+/* Ctrl+F or Alt+F toggles the counter, in every state; no game action is bound to a key with Ctrl or Alt
+ * held, so whatever F does alone (flying, by default) is left alone. True if the event was the
+ * toggle's. */
+static bool fps_event(game *g, const SDL_Event *e)
+{
+    if (e->type == SDL_EVENT_TEXT_INPUT && g->fps.eat_text) {
+        g->fps.eat_text = false;
+        return true;
+    }
+    if (e->type != SDL_EVENT_KEY_DOWN)
+        return false;
+    g->fps.eat_text = false;
+    if (e->key.key != SDLK_F || !(e->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT)))
+        return false;
+    if (!e->key.repeat && g->fps.layer && g->have_fonts) {
+        g->fps.on = !g->fps.on;
+        g->fps.frames = 0;
+        g->fps.since_ns = SDL_GetTicksNS();
+        if (g->fps.on)
+            fps_show(g, "- FPS");
+    }
+    g->fps.eat_text = true;
+    return true;
+}
+
+/* Counts a frame and draws the counter over it. */
+static void draw_fps(game *g, uint64_t now, int w, int h)
+{
+    if (!g->fps.on)
+        return;
+    g->fps.frames++;
+    uint64_t span = now - g->fps.since_ns;
+    if (span >= FPS_PERIOD_NS) {
+        char text[24];
+        snprintf(text, sizeof text, "%u FPS", (unsigned)((g->fps.frames * 1000000000ull + span / 2) / span));
+        fps_show(g, text);
+        g->fps.frames = 0;
+        g->fps.since_ns = now;
+    }
+    bs_overlay_draw(g->fps.layer, w, h);
+}
+
 /* ---- events ---- */
 
 static void handle_event(game *g, const SDL_Event *e)
 {
+    if (fps_event(g, e))
+        return;
     if (e->type == SDL_EVENT_QUIT) {
         leave_state(g);
         g->state = STATE_QUIT;
@@ -4647,6 +4715,8 @@ int main(int argc, char **argv)
     }
     if (bs_overlay_create(&g.overlay) != BS_OK)
         BS_WARN("no overlay: messages won't show");
+    if (bs_overlay_create(&g.fps.layer) != BS_OK)
+        BS_WARN("no overlay for the frame rate counter");
     SDL_GL_SetSwapInterval(1);
 
     g.settings = bs_render_settings_default();
@@ -4662,6 +4732,7 @@ int main(int argc, char **argv)
         snprintf(dir, sizeof dir, "%s", g.data_dir);
         launcher_testing testing = {o.screenshot, SCREENSHOT_MS, save_screenshot};
         if (!launcher_run(g.window, g.screen, dir, sizeof dir, &testing)) {
+            bs_overlay_destroy(g.fps.layer);
             bs_overlay_destroy(g.overlay);
             bs_screen_destroy(g.screen);
             SDL_GL_DestroyContext(ctx);
@@ -4882,6 +4953,7 @@ int main(int argc, char **argv)
         case STATE_QUIT:
             break;
         }
+        draw_fps(&g, now, w, h);
         if (o.screenshot && now - start > (uint64_t)SCREENSHOT_MS * 1000000) {
             save_screenshot(o.screenshot, w, h);
             leave_state(&g);
@@ -4898,6 +4970,7 @@ int main(int argc, char **argv)
     bs_bsa_close(g.waves);
     bs_arena_free(&g.voice_arena);
     bs_arena_free(&g.book_arena);
+    bs_overlay_destroy(g.fps.layer);
     bs_overlay_destroy(g.overlay);
     bs_screen_destroy(g.screen);
     bs_audio_close(g.audio);
