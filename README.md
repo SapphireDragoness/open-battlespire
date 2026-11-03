@@ -5,6 +5,8 @@ This is a hobby project made both to revamp an old, poorly dated game, and to te
 
 DISCLAIMER: **No game data is included.** You need your own copy of Battlespire (e.g. the GOG release); the engine reads the original files at runtime.
 
+Short video of the game game running natively on Linux: https://www.youtube.com/watch?v=xu_rbahvLeE
+
 ## I just want to play the game!
 
 1. Buy the original game from [Steam](https://store.steampowered.com/app/1812420/An_Elder_Scrolls_Legend_Battlespire) or [GOG](https://www.gog.com/en/game/an_elder_scrolls_legend_battlespire).
