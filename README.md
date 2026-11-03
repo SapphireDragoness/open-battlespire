@@ -5,7 +5,7 @@ This is a hobby project made both to revamp an old, poorly dated game, and to te
 
 DISCLAIMER: **No game data is included.** You need your own copy of Battlespire (e.g. the GOG release); the engine reads the original files at runtime.
 
-Short video of the game game running natively on Linux: https://www.youtube.com/watch?v=xu_rbahvLeE
+Short video of the game running natively on Linux: https://www.youtube.com/watch?v=xu_rbahvLeE
 
 ## I just want to play the game!
 
