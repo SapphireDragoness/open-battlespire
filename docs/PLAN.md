@@ -231,15 +231,14 @@ parallel throughout.
 - **Exit:** walk through L1 "The Weir Gate" from start to exit, with collision
   matching the original.
 
-### M6 — Game simulation 🟡 (started 2026-10-14; all five steps done 2026-10-15, exit check pending)
+### M6 — Game simulation ✅ (started 2026-10-14; all five steps done 2026-10-15, exit check 2026-11-04)
 - Entity system, item pickups, containers, keys and sigils, triggers, level transitions. ✅
 - Actors: animation states, AI using the `NODES` graphs, perception, and pathing. ✅ (a shortest
   path stands in for the game's own node search)
 - Combat: melee, ranged, and damage formulas (from RE). ✅ for the player; monsters with bows open.
 - Magic: spellcasting and effects. ✅ but Dispel Magic's list, the Detect displays, Confusion,
   magic items' spells and Dispel Sigil.
-- **Exit:** L1 is playable start to finish with enemies and items. Not yet checked as a whole
-  play-through with a made character.
+- **Exit:** L1 is playable start to finish with enemies and items. **Working, checked manually on 2026-11-04**.
 
 ### M7 — UI and RPG systems 🟡 (started 2026-10-14; all items in 2026-10-20, exit check pending)
 - Parsers: `.SCL` class files ✅ (2026-10-15), `TXT.BSA` talk and random-talk tables (moved from M1).

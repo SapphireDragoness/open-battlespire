@@ -460,7 +460,8 @@ static void usage(FILE *out)
             "  original: arrows move, Alt jump, Delete/End turn, Insert/Home look, S sneak,\n"
             "            Space + mouse back duck, A switch weapon, PgUp/PgDn up/down, F10 inventory,\n"
             "            D leave a boat\n"
-            "  both:     L lantern, F fly (Shift faster), G classic/enhanced rendering, M sound,\n"
+            "  both:     L lantern, F fly (Shift faster), G classic/enhanced rendering,\n"
+            "            H lighting per vertex/per pixel, M sound,\n"
             "            Esc options (End Game goes back to the title)\n"
             "  anywhere: Ctrl+F or Alt+F shows or hides the frame rate (top right)\n");
 }
@@ -2864,6 +2865,8 @@ static void load_settings(game *g, bool keep_keys)
                 g->menus.low_resolution = strcmp(v, "no") != 0;
             if ((v = bs_ini_get(&ini.sections[i], "help_popups")))
                 g->menus.auto_help = strcmp(v, "no") != 0;
+            if ((v = bs_ini_get(&ini.sections[i], "vertex_lighting")))
+                g->settings.vertex_lighting = strcmp(v, "no") != 0;
         }
     } else {
         BS_WARN("%s: not read", path);
@@ -2884,6 +2887,8 @@ static void save_settings(game *g)
     bs_ini_put(&w, "low_resolution", "the view drawn at half size and doubled", "%s",
                g->menus.low_resolution ? "yes" : "no");
     bs_ini_put(&w, "help_popups", NULL, "%s", g->menus.auto_help ? "yes" : "no");
+    bs_ini_put(&w, "vertex_lighting", "light per vertex, not per pixel: lighter on the GPU (H)", "%s",
+               g->settings.vertex_lighting ? "yes" : "no");
     controls_write(&g->keys, &w);
     if (g->data_dir[0]) {
         bs_ini_section_begin(&w, "data");
@@ -4392,6 +4397,11 @@ static void handle_event(game *g, const SDL_Event *e)
                 open_menu(g, MENU_OPTIONS);
             } else if (e->key.key == SDLK_G) {
                 g->settings.classic = !g->settings.classic;
+            } else if (e->key.key == SDLK_H) {
+                /* Light per vertex instead of per pixel: much less work for the GPU (not in the original). */
+                g->settings.vertex_lighting = !g->settings.vertex_lighting;
+                message(g, g->settings.vertex_lighting ? "Lighting per vertex" : "Lighting per pixel");
+                save_settings(g);
             } else if (e->key.key == SDLK_M && g->audio) {
                 static bool paused;
                 paused = !paused;

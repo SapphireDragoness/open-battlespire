@@ -91,7 +91,8 @@ cursor to click its buttons: the face opens the character sheet (F9), the
 books the spell book and the automap (F11), the chest the inventory, the
 gears the options bar (Esc), the compass lists your hot keys and "?" shows
 the help pages. Tab hides the bar for the full view. F toggles flying, G
-classic/enhanced rendering. Ctrl+F (or Alt+F) shows the frame rate in the
+classic/enhanced rendering, H lighting per vertex or per pixel (per vertex is
+much lighter on the GPU; the choice is remembered). Ctrl+F (or Alt+F) shows the frame rate in the
 top right corner, anywhere in the game. End Game in the options bar goes back to the
 title. Screen Size there makes the view smaller (centred on a stone wall,
 as the original's) and picks LOW or HIGH resolution, which classic rendering

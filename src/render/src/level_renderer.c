@@ -90,6 +90,8 @@ static const char *const sprite_vs =
     "uniform vec3 u_right;\n"
     "uniform vec3 u_up;\n"
     "uniform vec2 u_frame;  /* v offset and scale of the current frame */\n"
+    "uniform int u_vertex_light;\n"
+    LIGHT_GLSL
     "out vec3 v_pos;\n"
     "out vec3 v_normal;\n"
     "out vec2 v_uv;\n"
@@ -98,8 +100,8 @@ static const char *const sprite_vs =
     "void main() {\n"
     "    v_normal = vec3(0.0);\n"
     "    v_face_byte = 0.0;\n"
-    "    v_light = -1.0;\n"
     "    v_pos = u_center + u_right * a_pos.x * u_size.x + u_up * a_pos.y * u_size.y;\n"
+    "    v_light = u_vertex_light != 0 ? light_at(v_pos, vec3(0.0)) : -1.0;\n"
     "    v_uv = vec2(a_pos.x + 0.5, u_frame.x + (0.5 - a_pos.y) * u_frame.y);\n"
     "    gl_Position = u_mvp * vec4(v_pos, 1.0);\n"
     "}\n";

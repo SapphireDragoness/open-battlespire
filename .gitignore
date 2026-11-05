@@ -28,6 +28,7 @@ SAVE*/
 /extracted/
 bsview_*.png
 
+docs/playthrough.md
 screenshots/
 wiki/
 # Release packages (packaging/*.sh)
