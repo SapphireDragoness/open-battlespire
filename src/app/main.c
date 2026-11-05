@@ -32,6 +32,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-prototypes"
 #endif
+#define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL_main.h>
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
@@ -3961,16 +3962,17 @@ static const char *saves_dir(game *g)
 /* The view as the original keeps it with a save: 80 x 50, RGB555 (0x30276), from the window now. */
 static void capture_picture(game *g, int w, int h)
 {
-    uint8_t *px = malloc((size_t)w * (size_t)h * 3);
+    /* RGBA: the one format OpenGL ES (and WebGL) always reads back. */
+    uint8_t *px = malloc((size_t)w * (size_t)h * 4);
     if (!px)
         return;
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
     for (int y = 0; y < BS_SAVE_IMAGE_HEIGHT; y++)
         for (int x = 0; x < BS_SAVE_IMAGE_WIDTH; x++) {
             int sx = x * w / BS_SAVE_IMAGE_WIDTH, sy = h - 1 - y * h / BS_SAVE_IMAGE_HEIGHT;
-            const uint8_t *p = px + ((size_t)sy * (size_t)w + (size_t)sx) * 3;
+            const uint8_t *p = px + ((size_t)sy * (size_t)w + (size_t)sx) * 4;
             uint16_t v = (uint16_t)((p[0] >> 3) << 10 | (p[1] >> 3) << 5 | p[2] >> 3);
             g->save_picture[2 * (y * BS_SAVE_IMAGE_WIDTH + x)] = (uint8_t)v;
             g->save_picture[2 * (y * BS_SAVE_IMAGE_WIDTH + x) + 1] = (uint8_t)(v >> 8);
@@ -4647,14 +4649,17 @@ static bool open_data(game *g, const char *dir)
 
 static void save_screenshot(const char *path, int w, int h)
 {
-    uint8_t *px = malloc((size_t)w * (size_t)h * 3), *flipped = malloc((size_t)w * (size_t)h * 3);
+    uint8_t *px = malloc((size_t)w * (size_t)h * 4), *flipped = malloc((size_t)w * (size_t)h * 3);
     if (px && flipped) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px);
-        size_t row = (size_t)w * 3;
-        for (int y = 0; y < h; y++)
-            memcpy(flipped + (size_t)y * row, px + (size_t)(h - 1 - y) * row, row);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px); /* RGBA: as capture_picture */
+        for (int y = 0; y < h; y++) {
+            const uint8_t *src = px + (size_t)(h - 1 - y) * (size_t)w * 4;
+            uint8_t *dst = flipped + (size_t)y * (size_t)w * 3;
+            for (int x = 0; x < w; x++, src += 4, dst += 3)
+                memcpy(dst, src, 3);
+        }
         if (bs_png_write_rgb(path, (uint32_t)w, (uint32_t)h, flipped) != BS_OK)
             fprintf(stderr, "openbattlespire: cannot write %s\n", path);
     }
@@ -4669,316 +4674,354 @@ static bs_gl_proc gl_loader(const char *name)
     return (bs_gl_proc)gl_proc_any;
 }
 
-int main(int argc, char **argv)
-{
-    platform_attach_console();
+/* SDL runs the program through four callbacks (SDL_MAIN_USE_CALLBACKS): SDL_AppInit once, then SDL_AppEvent
+ * for each event and SDL_AppIterate for each frame until one of them ends it, then SDL_AppQuit. Where the
+ * program can own its loop SDL loops; in a browser the page's animation frames call SDL_AppIterate. */
+static struct {
     options o;
+    game g;
+    SDL_GLContext ctx;
+    uint64_t start, last; /* SDL_GetTicksNS() at the first frame and at the last */
+    bool running;         /* all that SDL_AppQuit frees is set up */
+} app;
+
+SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
+{
+    (void)appstate;
+    platform_attach_console();
+    options *o = &app.o;
     bool help;
-    bool parsed = parse_args(argc, argv, &o, &help);
+    bool parsed = parse_args(argc, argv, o, &help);
     if (help || !parsed) {
         usage(help ? stdout : stderr);
-        return help ? 0 : 2;
+        if (!help)
+            exit(2); /* nothing is set up yet; SDL's failure would exit 1 */
+        return SDL_APP_SUCCESS;
     }
 
-    static game g;
-    bs_arena_init(&g.arena, 0);
-    g.female = o.female;
-    g.race = o.race ? o.race : "br";
-    g.name = o.name ? o.name : "Adventurer";
-    g.hair = 0; /* the first of each, for --level */
-    g.eyes = 1;
-    g.mouth = 1;
-    bs_character_default(&g.character);
-    bs_dialogue_state_init(&g.dialogue);
-    talk_init(&g.talk);
-    menus_init(&g.menus);
-    bs_arena_init(&g.book_arena, 0);
-    g.monsters_on = !o.no_monsters;
-    if (o.saves)
-        snprintf(g.saves_dir, sizeof g.saves_dir, "%s", o.saves);
+    game *g = &app.g;
+    bs_arena_init(&g->arena, 0);
+    g->female = o->female;
+    g->race = o->race ? o->race : "br";
+    g->name = o->name ? o->name : "Adventurer";
+    g->hair = 0; /* the first of each, for --level */
+    g->eyes = 1;
+    g->mouth = 1;
+    bs_character_default(&g->character);
+    bs_dialogue_state_init(&g->dialogue);
+    talk_init(&g->talk);
+    menus_init(&g->menus);
+    bs_arena_init(&g->book_arena, 0);
+    g->monsters_on = !o->no_monsters;
+    if (o->saves)
+        snprintf(g->saves_dir, sizeof g->saves_dir, "%s", o->saves);
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fatal(NULL, "SDL_Init: %s", SDL_GetError());
-        return 1;
+        return SDL_APP_FAILURE;
     }
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+#ifdef BS_GLES
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+#endif
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    g.window = SDL_CreateWindow("OpenBattlespire", o.width, o.height, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-    SDL_GLContext ctx = g.window ? SDL_GL_CreateContext(g.window) : NULL;
+    g->window = SDL_CreateWindow("OpenBattlespire", o->width, o->height, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    app.ctx = g->window ? SDL_GL_CreateContext(g->window) : NULL;
     const char *missing;
-    if (!ctx || !bs_gl_load(gl_loader, &missing) || bs_screen_create(&g.screen) != BS_OK) {
-        fatal(g.window, "Cannot create an OpenGL 3.3 context: %s", ctx ? missing : SDL_GetError());
-        return 1;
+    if (!app.ctx || !bs_gl_load(gl_loader, &missing) || bs_screen_create(&g->screen) != BS_OK) {
+        fatal(g->window, "Cannot create an " BS_GL_NAME " context: %s", app.ctx ? missing : SDL_GetError());
+        return SDL_APP_FAILURE;
     }
-    if (bs_overlay_create(&g.overlay) != BS_OK)
+    BS_INFO("OpenGL %s on %s", (const char *)glGetString(GL_VERSION), (const char *)glGetString(GL_RENDERER));
+    if (bs_overlay_create(&g->overlay) != BS_OK)
         BS_WARN("no overlay: messages won't show");
-    if (bs_overlay_create(&g.fps.layer) != BS_OK)
+    if (bs_overlay_create(&g->fps.layer) != BS_OK)
         BS_WARN("no overlay for the frame rate counter");
     SDL_GL_SetSwapInterval(1);
 
-    g.settings = bs_render_settings_default();
-    g.cam.fov_y = 53.13f * SDL_PI_F / 180.0f; /* the game's at 640x480 (RE: 0x10F5C) */
-    controls_set(&g.keys, o.original_keys);
-    load_settings(&g, o.keys_given);
-    apply_controls(&g);
+    g->settings = bs_render_settings_default();
+    g->cam.fov_y = 53.13f * SDL_PI_F / 180.0f; /* the game's at 640x480 (RE: 0x10F5C) */
+    controls_set(&g->keys, o->original_keys);
+    load_settings(g, o->keys_given);
+    apply_controls(g);
 
     /* The Battlespire folder: -d or BS_DATA_DIR, else the startup screen's (which shows the last one). */
-    const char *data_dir = o.data_dir;
+    const char *data_dir = o->data_dir;
     if (!data_dir) {
         char dir[BS_PATH_MAX];
-        snprintf(dir, sizeof dir, "%s", g.data_dir);
-        launcher_testing testing = {o.screenshot, SCREENSHOT_MS, save_screenshot};
-        if (!launcher_run(g.window, g.screen, dir, sizeof dir, &testing)) {
-            bs_overlay_destroy(g.fps.layer);
-            bs_overlay_destroy(g.overlay);
-            bs_screen_destroy(g.screen);
-            SDL_GL_DestroyContext(ctx);
-            SDL_DestroyWindow(g.window);
-            SDL_Quit();
-            return 0;
+        snprintf(dir, sizeof dir, "%s", g->data_dir);
+        launcher_testing testing = {o->screenshot, SCREENSHOT_MS, save_screenshot};
+        if (!launcher_run(g->window, g->screen, dir, sizeof dir, &testing)) {
+            bs_overlay_destroy(g->fps.layer);
+            bs_overlay_destroy(g->overlay);
+            bs_screen_destroy(g->screen);
+            SDL_GL_DestroyContext(app.ctx);
+            SDL_DestroyWindow(g->window);
+            return SDL_APP_SUCCESS;
         }
-        if (strcmp(dir, g.data_dir) != 0) {
-            snprintf(g.data_dir, sizeof g.data_dir, "%s", dir);
-            save_settings(&g);
+        if (strcmp(dir, g->data_dir) != 0) {
+            snprintf(g->data_dir, sizeof g->data_dir, "%s", dir);
+            save_settings(g);
         }
-        data_dir = g.data_dir;
+        data_dir = g->data_dir;
     }
-    if (!open_data(&g, data_dir))
-        return 1;
+    if (!open_data(g, data_dir))
+        return SDL_APP_FAILURE;
     /* Spells known from the start, for --level (Single Player makes the character). */
-    for (const char *p = o.spells; p && *p && g.have_spells;) {
+    for (const char *p = o->spells; p && *p && g->have_spells;) {
         if (strncmp(p, "all", 3) == 0) {
             for (int i = 0; i < BS_SPELL_COUNT - 1; i++) /* not Dispel Sigil: multiplayer's */
-                bs_character_learn(&g.character, &g.spells[i]);
+                bs_character_learn(&g->character, &g->spells[i]);
             break;
         }
         int n = atoi(p);
         if (n >= 1 && n <= BS_SPELL_COUNT)
-            bs_character_learn(&g.character, &g.spells[n - 1]);
+            bs_character_learn(&g->character, &g->spells[n - 1]);
         p = strchr(p, ',');
         p = p ? p + 1 : NULL;
     }
 
-    give_items(&g, o.give);
+    give_items(g, o->give);
 
-    if (!o.mute && (!SDL_InitSubSystem(SDL_INIT_AUDIO) || bs_audio_open(&g.audio) != BS_OK)) {
+    if (!o->mute && (!SDL_InitSubSystem(SDL_INIT_AUDIO) || bs_audio_open(&g->audio) != BS_OK)) {
         BS_WARN("no audio device: running silent");
-        g.audio = NULL;
+        g->audio = NULL;
     }
-    bs_level_audio_open(&g.level_audio, g.audio, &g.vfs);
-    g.level_audio.fixed_ambience = o.fixed_ambience;
-    g.level_audio.locate = sound_source;
-    g.level_audio.locate_ctx = &g;
+    bs_level_audio_open(&g->level_audio, g->audio, &g->vfs);
+    g->level_audio.fixed_ambience = o->fixed_ambience;
+    g->level_audio.locate = sound_source;
+    g->level_audio.locate_ctx = g;
 
-    g.state = STATE_QUIT; /* nothing to leave yet */
-    if (o.load) {
-        if (!load_game(&g, o.load))
-            return 1;
-    } else if (o.level)
-        enter_level(&g, o.level);
-    else if (o.no_intro)
-        enter_title(&g);
+    g->state = STATE_QUIT; /* nothing to leave yet */
+    if (o->load) {
+        if (!load_game(g, o->load))
+            return SDL_APP_FAILURE;
+    } else if (o->level)
+        enter_level(g, o->level);
+    else if (o->no_intro)
+        enter_title(g);
     else
-        enter_intro(&g);
+        enter_intro(g);
 
-    if (o.inventory && g.state == STATE_LEVEL)
-        open_inventory(&g, (bs_item_place){BS_ITEM_FLOOR, bs_items_cell(g.world_items.grid_cell, g.player.pos)});
-    if (o.level_up && g.state == STATE_LEVEL) {
-        open_menu(&g, MENU_SHEET);
-        menus_level_up(&g.menus, &g.character, bs_level_up_points(o.level_up));
+    if (o->inventory && g->state == STATE_LEVEL)
+        open_inventory(g, (bs_item_place){BS_ITEM_FLOOR, bs_items_cell(g->world_items.grid_cell, g->player.pos)});
+    if (o->level_up && g->state == STATE_LEVEL) {
+        open_menu(g, MENU_SHEET);
+        menus_level_up(&g->menus, &g->character, bs_level_up_points(o->level_up));
     }
-    uint64_t start = SDL_GetTicksNS(), last = start;
-    while (g.state != STATE_QUIT) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e))
-            handle_event(&g, &e);
-        if (g.state == STATE_LEVEL && g.go != GO_NONE)
-            make_transition(&g);
-        uint64_t now = SDL_GetTicksNS();
-        float dt = (float)(now - last) / 1e9f;
-        last = now;
-        int w, h;
-        SDL_GetWindowSizeInPixels(g.window, &w, &h);
-        update_pointer(&g);
+    app.start = app.last = SDL_GetTicksNS();
+    app.running = true;
+    return g->state == STATE_QUIT ? SDL_APP_SUCCESS : SDL_APP_CONTINUE;
+}
 
-        switch (g.state) {
-        case STATE_INTRO: {
-            bool done = false;
-            const uint8_t *frame = g.video_held ? NULL : bs_video_update(g.video, &done);
-            if (frame)
-                bs_screen_set(g.screen, frame, bs_video_width(g.video), bs_video_height(g.video));
-            if (done) {
-                if (bs_video_error(g.video) != BS_OK)
-                    BS_WARN("video: %s", bs_result_str(bs_video_error(g.video)));
-                if (g.video_hold)
-                    g.video_held = true;
-                else
-                    after_video(&g);
-            }
-            bs_screen_draw(g.screen, w, h);
-            if (g.state == STATE_INTRO && g.video_text[0] && g.overlay)
-                bs_overlay_draw(g.overlay, w, h);
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *e)
+{
+    (void)appstate;
+    handle_event(&app.g, e);
+    return SDL_APP_CONTINUE; /* SDL_AppIterate ends it, after the frame, as the loop did */
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
+    (void)appstate;
+    game *g = &app.g;
+    const options *o = &app.o;
+    if (g->state == STATE_LEVEL && g->go != GO_NONE)
+        make_transition(g);
+    uint64_t now = SDL_GetTicksNS();
+    float dt = (float)(now - app.last) / 1e9f;
+    app.last = now;
+    int w, h;
+    SDL_GetWindowSizeInPixels(g->window, &w, &h);
+    update_pointer(g);
+
+    switch (g->state) {
+    case STATE_INTRO: {
+        bool done = false;
+        const uint8_t *frame = g->video_held ? NULL : bs_video_update(g->video, &done);
+        if (frame)
+            bs_screen_set(g->screen, frame, bs_video_width(g->video), bs_video_height(g->video));
+        if (done) {
+            if (bs_video_error(g->video) != BS_OK)
+                BS_WARN("video: %s", bs_result_str(bs_video_error(g->video)));
+            if (g->video_hold)
+                g->video_held = true;
+            else
+                after_video(g);
+        }
+        bs_screen_draw(g->screen, w, h);
+        if (g->state == STATE_INTRO && g->video_text[0] && g->overlay)
+            bs_overlay_draw(g->overlay, w, h);
+        break;
+    }
+    case STATE_TITLE:
+        bs_screen_draw(g->screen, w, h);
+        break;
+    case STATE_CREATION:
+        draw_creation(g, w, h);
+        break;
+    case STATE_LEVEL:
+        g->level_audio.acute_hearing = g->character.acute_hearing;
+        bs_level_audio_update(&g->level_audio, g->cam.pos, g->cam.yaw, dt);
+        if (g->inv.open && g->overlay) {
+            /* The world waits while the inventory is open. */
+            inventory_env env = inventory_env_of(g);
+            inventory_draw(&g->inv, &env, w, h, SDL_GetTicks());
+            update_messages(g);
+            draw_messages(g);
+            bs_overlay_draw(g->overlay, w, h);
             break;
         }
-        case STATE_TITLE:
-            bs_screen_draw(g.screen, w, h);
+        if (g->loadsave.open && g->overlay) {
+            /* The Load and Save screen covers everything; the world waits. */
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, w, h);
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            bs_overlay_clear(g->overlay);
+            loadsave_env env = loadsave_env_of(g);
+            loadsave_draw(&g->loadsave, &env, g->overlay);
+            update_messages(g);
+            draw_messages(g);
+            bs_overlay_draw(g->overlay, w, h);
+            g->overlay_dirty = true;
             break;
-        case STATE_CREATION:
-            draw_creation(&g, w, h);
+        }
+        if (g->talk.open && g->overlay) {
+            /* The world waits while a conversation goes on (0x58043). */
+            talk_env env = talk_env_of(g);
+            talk_draw(&g->talk, &env, w, h);
+            update_messages(g);
+            draw_messages(g);
+            bs_overlay_draw(g->overlay, w, h);
+            g->overlay_dirty = true;
             break;
-        case STATE_LEVEL:
-            g.level_audio.acute_hearing = g.character.acute_hearing;
-            bs_level_audio_update(&g.level_audio, g.cam.pos, g.cam.yaw, dt);
-            if (g.inv.open && g.overlay) {
-                /* The world waits while the inventory is open. */
-                inventory_env env = inventory_env_of(&g);
-                inventory_draw(&g.inv, &env, w, h, SDL_GetTicks());
-                update_messages(&g);
-                draw_messages(&g);
-                bs_overlay_draw(g.overlay, w, h);
-                break;
-            }
-            if (g.loadsave.open && g.overlay) {
-                /* The Load and Save screen covers everything; the world waits. */
+        }
+        if (g->menus.open != MENU_NONE && g->overlay) {
+            /* The world waits while a screen is open: the game shows behind the options bar, small in the
+             * help pages' window, not at all behind the others. */
+            int r[4];
+            int view = menus_view(&g->menus, r);
+            if (view == 1) {
+                show_instances(g);
+                draw_level_view(g, w, h, (double)(now - app.start) / 1e9);
+            } else if (view == 2) {
+                bs_level_renderer_draw_inset(g->level.renderer, &g->cam, &g->settings, w, h,
+                                             (double)(now - app.start) / 1e9, r[0], r[1], r[2], r[3]);
+            } else {
                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
                 glViewport(0, 0, w, h);
                 glClearColor(0, 0, 0, 1);
                 glClear(GL_COLOR_BUFFER_BIT);
-                bs_overlay_clear(g.overlay);
-                loadsave_env env = loadsave_env_of(&g);
-                loadsave_draw(&g.loadsave, &env, g.overlay);
-                update_messages(&g);
-                draw_messages(&g);
-                bs_overlay_draw(g.overlay, w, h);
-                g.overlay_dirty = true;
-                break;
             }
-            if (g.talk.open && g.overlay) {
-                /* The world waits while a conversation goes on (0x58043). */
-                talk_env env = talk_env_of(&g);
-                talk_draw(&g.talk, &env, w, h);
-                update_messages(&g);
-                draw_messages(&g);
-                bs_overlay_draw(g.overlay, w, h);
-                g.overlay_dirty = true;
-                break;
-            }
-            if (g.menus.open != MENU_NONE && g.overlay) {
-                /* The world waits while a screen is open: the game shows behind the options bar, small in the
-                 * help pages' window, not at all behind the others. */
-                int r[4];
-                int view = menus_view(&g.menus, r);
-                if (view == 1) {
-                    show_instances(&g);
-                    draw_level_view(&g, w, h, (double)(now - start) / 1e9);
-                } else if (view == 2) {
-                    bs_level_renderer_draw_inset(g.level.renderer, &g.cam, &g.settings, w, h,
-                                                 (double)(now - start) / 1e9, r[0], r[1], r[2], r[3]);
-                } else {
-                    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-                    glViewport(0, 0, w, h);
-                    glClearColor(0, 0, 0, 1);
-                    glClear(GL_COLOR_BUFFER_BIT);
-                }
-                bs_overlay_clear(g.overlay);
-                const bs_bsi_image *doll[STATUSBAR_FACE_LAYERS];
-                menu_env me = menu_env_of(&g, doll, STATUSBAR_FACE_LAYERS);
-                if (view == 1)
-                    menus_draw_view_border(&g.menus, &me, g.overlay);
-                menus_draw(&g.menus, &me, g.overlay);
-                update_messages(&g);
-                draw_messages(&g);
-                bs_overlay_draw(g.overlay, w, h);
-                g.overlay_dirty = true;
-                break;
-            }
-            run_level(&g, dt);
-            if (g.state != STATE_LEVEL)
-                break; /* the player died and the ending began */
-            if (g.fight.magic.teleport_screen) {
-                /* Teleport was cast: its screen, with the cursor (0x2B1FC). */
-                g.fight.magic.teleport_screen = false;
-                if (g.teleport_image && !g.teleporting) {
-                    g.teleporting = true;
-                    g.had_mouse = SDL_GetWindowRelativeMouseMode(g.window);
-                    SDL_SetWindowRelativeMouseMode(g.window, false);
-                }
-            }
-            fight_draw(&g.fight, g.cam.pos, logic_now(&g), g.level.renderer);
-            show_instances(&g);
-            draw_level_view(&g, w, h, (double)(now - start) / 1e9);
-            if (g.overlay) {
-                update_messages(&g);
-                if (g.overlay_dirty || g.hud_moving || hud_active(&g) || g.spellbook.open || g.teleporting ||
-                    g.bar.panel) {
-                    bs_overlay_clear(g.overlay);
-                    menus_draw_view_border(&g.menus, &(menu_env){.assets = g.assets}, g.overlay);
-                    fight_env fe = fight_env_of(&g);
-                    g.hud_moving = fight_draw_hud(&g.fight, &fe, g.overlay);
-                    if (g.breath > 0) /* 7 wide at x 610, up from y 220 (0x1E6E0) */
-                        bs_overlay_fill(g.overlay, 610, 220 - g.breath, 7, g.breath,
-                                        g.breath < 10 ? 0xFF0000FFu : 0x00FF00FFu);
-                    int32_t yaw = (int32_t)lroundf(g.player.yaw * 2048.0f / (2.0f * 3.14159265f));
-                    /* The face shows what the character wears. */
-                    inventory_env ie = inventory_env_of(&g);
-                    const bs_bsi_image *face[STATUSBAR_FACE_LAYERS];
-                    statusbar_set_face(&g.bar, face, inventory_doll_images(&ie, face, STATUSBAR_FACE_LAYERS),
-                                       inventory_doll_eyes(&ie));
-                    statusbar_draw(&g.bar, g.overlay, &g.character, yaw);
-                    if (g.spellbook.open) {
-                        spellbook_env be = spellbook_env_of(&g);
-                        spellbook_draw(&g.spellbook, &be);
-                    }
-                    if (g.teleporting)
-                        bs_overlay_image(g.overlay, g.teleport_image, 0, 0);
-                    draw_messages(&g);
-                    if (g.arrow >= 0)
-                        bs_overlay_image(g.overlay, g.direc[g.arrow], g.arrow_x, g.arrow_y);
-                    g.overlay_dirty = false;
-                }
-                bs_overlay_draw(g.overlay, w, h);
-            }
-            /* For 250 ms after a hurt the whole screen keeps only its red (0x43957, TINT.555). */
-            if (g.hurt_at && logic_now(&g) >= g.hurt_at && logic_now(&g) - g.hurt_at <= HURT_TINT_MS)
-                bs_screen_keep_red(w, h);
-            if (g.picture_pending) {
-                g.picture_pending = false;
-                capture_picture(&g, w, h);
-                open_loadsave(&g, LOADSAVE_SAVE);
-            }
-            break;
-        case STATE_QUIT:
+            bs_overlay_clear(g->overlay);
+            const bs_bsi_image *doll[STATUSBAR_FACE_LAYERS];
+            menu_env me = menu_env_of(g, doll, STATUSBAR_FACE_LAYERS);
+            if (view == 1)
+                menus_draw_view_border(&g->menus, &me, g->overlay);
+            menus_draw(&g->menus, &me, g->overlay);
+            update_messages(g);
+            draw_messages(g);
+            bs_overlay_draw(g->overlay, w, h);
+            g->overlay_dirty = true;
             break;
         }
-        draw_fps(&g, now, w, h);
-        if (o.screenshot && now - start > (uint64_t)SCREENSHOT_MS * 1000000) {
-            save_screenshot(o.screenshot, w, h);
-            leave_state(&g);
-            g.state = STATE_QUIT;
+        run_level(g, dt);
+        if (g->state != STATE_LEVEL)
+            break; /* the player died and the ending began */
+        if (g->fight.magic.teleport_screen) {
+            /* Teleport was cast: its screen, with the cursor (0x2B1FC). */
+            g->fight.magic.teleport_screen = false;
+            if (g->teleport_image && !g->teleporting) {
+                g->teleporting = true;
+                g->had_mouse = SDL_GetWindowRelativeMouseMode(g->window);
+                SDL_SetWindowRelativeMouseMode(g->window, false);
+            }
         }
-        SDL_GL_SwapWindow(g.window);
+        fight_draw(&g->fight, g->cam.pos, logic_now(g), g->level.renderer);
+        show_instances(g);
+        draw_level_view(g, w, h, (double)(now - app.start) / 1e9);
+        if (g->overlay) {
+            update_messages(g);
+            if (g->overlay_dirty || g->hud_moving || hud_active(g) || g->spellbook.open || g->teleporting ||
+                g->bar.panel) {
+                bs_overlay_clear(g->overlay);
+                menus_draw_view_border(&g->menus, &(menu_env){.assets = g->assets}, g->overlay);
+                fight_env fe = fight_env_of(g);
+                g->hud_moving = fight_draw_hud(&g->fight, &fe, g->overlay);
+                if (g->breath > 0) /* 7 wide at x 610, up from y 220 (0x1E6E0) */
+                    bs_overlay_fill(g->overlay, 610, 220 - g->breath, 7, g->breath,
+                                    g->breath < 10 ? 0xFF0000FFu : 0x00FF00FFu);
+                int32_t yaw = (int32_t)lroundf(g->player.yaw * 2048.0f / (2.0f * 3.14159265f));
+                /* The face shows what the character wears. */
+                inventory_env ie = inventory_env_of(g);
+                const bs_bsi_image *face[STATUSBAR_FACE_LAYERS];
+                statusbar_set_face(&g->bar, face, inventory_doll_images(&ie, face, STATUSBAR_FACE_LAYERS),
+                                   inventory_doll_eyes(&ie));
+                statusbar_draw(&g->bar, g->overlay, &g->character, yaw);
+                if (g->spellbook.open) {
+                    spellbook_env be = spellbook_env_of(g);
+                    spellbook_draw(&g->spellbook, &be);
+                }
+                if (g->teleporting)
+                    bs_overlay_image(g->overlay, g->teleport_image, 0, 0);
+                draw_messages(g);
+                if (g->arrow >= 0)
+                    bs_overlay_image(g->overlay, g->direc[g->arrow], g->arrow_x, g->arrow_y);
+                g->overlay_dirty = false;
+            }
+            bs_overlay_draw(g->overlay, w, h);
+        }
+        /* For 250 ms after a hurt the whole screen keeps only its red (0x43957, TINT.555). */
+        if (g->hurt_at && logic_now(g) >= g->hurt_at && logic_now(g) - g->hurt_at <= HURT_TINT_MS)
+            bs_screen_keep_red(w, h);
+        if (g->picture_pending) {
+            g->picture_pending = false;
+            capture_picture(g, w, h);
+            open_loadsave(g, LOADSAVE_SAVE);
+        }
+        break;
+    case STATE_QUIT:
+        break;
     }
+    draw_fps(g, now, w, h);
+    if (o->screenshot && now - app.start > (uint64_t)SCREENSHOT_MS * 1000000) {
+        save_screenshot(o->screenshot, w, h);
+        leave_state(g);
+        g->state = STATE_QUIT;
+    }
+    SDL_GL_SwapWindow(g->window);
+    return g->state == STATE_QUIT ? SDL_APP_SUCCESS : SDL_APP_CONTINUE;
+}
 
-    bs_level_audio_close(&g.level_audio);
-    fight_free(&g.fight);
-    free(g.instances);
-    bs_bsa_close(g.txt);
-    bs_bsa_close(g.heads);
-    bs_bsa_close(g.waves);
-    bs_arena_free(&g.voice_arena);
-    bs_arena_free(&g.book_arena);
-    bs_overlay_destroy(g.fps.layer);
-    bs_overlay_destroy(g.overlay);
-    bs_screen_destroy(g.screen);
-    bs_audio_close(g.audio);
-    SDL_GL_DestroyContext(ctx);
-    SDL_DestroyWindow(g.window);
-    SDL_Quit();
-    bs_assets_close(g.assets);
-    bs_cdimage_close(g.cd);
-    bs_arena_free(&g.arena);
-    return 0;
+void SDL_AppQuit(void *appstate, SDL_AppResult result)
+{
+    (void)appstate;
+    (void)result;
+    if (!app.running)
+        return; /* SDL_AppInit stopped early: it freed what it had to, the end of the process does the rest */
+    game *g = &app.g;
+    bs_level_audio_close(&g->level_audio);
+    fight_free(&g->fight);
+    free(g->instances);
+    bs_bsa_close(g->txt);
+    bs_bsa_close(g->heads);
+    bs_bsa_close(g->waves);
+    bs_arena_free(&g->voice_arena);
+    bs_arena_free(&g->book_arena);
+    bs_overlay_destroy(g->fps.layer);
+    bs_overlay_destroy(g->overlay);
+    bs_screen_destroy(g->screen);
+    bs_audio_close(g->audio);
+    SDL_GL_DestroyContext(app.ctx);
+    SDL_DestroyWindow(g->window);
+    SDL_Quit(); /* SDL calls it again after this returns, which is harmless */
+    bs_assets_close(g->assets);
+    bs_cdimage_close(g->cd);
+    bs_arena_free(&g->arena);
 }

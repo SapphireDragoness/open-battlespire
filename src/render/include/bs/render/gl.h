@@ -17,6 +17,16 @@
 #define BS_GLAPI
 #endif
 
+/* OpenGL 3.3 core, or with BS_GLES OpenGL ES 3.0 (which WebGL 2 is): the renderer uses what both have.
+ * Shaders start with BS_GLSL_VERSION; GLSL ES gets the precision desktop GLSL always has. */
+#ifdef BS_GLES
+#define BS_GL_NAME "OpenGL ES 3.0"
+#define BS_GLSL_VERSION "#version 300 es\nprecision highp float;\nprecision highp int;\n"
+#else
+#define BS_GL_NAME "OpenGL 3.3"
+#define BS_GLSL_VERSION "#version 330 core\n"
+#endif
+
 typedef unsigned int GLenum;
 typedef unsigned int GLuint;
 typedef int GLint;

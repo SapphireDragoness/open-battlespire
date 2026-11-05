@@ -57,7 +57,7 @@
 /* ---- shaders ---- */
 
 static const char *const geometry_vs =
-    "#version 330 core\n"
+    BS_GLSL_VERSION
     "layout(location = 0) in vec3 a_pos;\n"
     "layout(location = 1) in vec3 a_normal;\n"
     "layout(location = 2) in vec2 a_uv;\n"
@@ -82,7 +82,7 @@ static const char *const geometry_vs =
 
 /* Billboards: a_pos.xy is the corner in [-0.5, 0.5]. */
 static const char *const sprite_vs =
-    "#version 330 core\n"
+    BS_GLSL_VERSION
     "layout(location = 0) in vec3 a_pos;\n"
     "uniform mat4 u_mvp;\n"
     "uniform vec3 u_center;\n"
@@ -105,7 +105,7 @@ static const char *const sprite_vs =
     "}\n";
 
 static const char *const shade_fs =
-    "#version 330 core\n"
+    BS_GLSL_VERSION
     "in vec3 v_pos;\n"
     "in vec3 v_normal;\n"
     "in vec2 v_uv;\n"
@@ -150,7 +150,7 @@ static const char *const shade_fs =
 
 /* Full-screen triangle; the view direction is rebuilt from the camera basis. */
 static const char *const sky_vs =
-    "#version 330 core\n"
+    BS_GLSL_VERSION
     "out vec2 v_ndc;\n"
     "void main() {\n"
     "    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2) * 2.0 - 1.0;\n"
@@ -159,7 +159,7 @@ static const char *const sky_vs =
     "}\n";
 
 static const char *const sky_fs =
-    "#version 330 core\n"
+    BS_GLSL_VERSION
     "in vec2 v_ndc;\n"
     "uniform sampler2D u_tex;\n"
     "uniform vec3 u_fwd;\n"

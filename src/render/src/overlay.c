@@ -16,7 +16,7 @@ struct bs_overlay {
 };
 
 static const char *const vs_src =
-    "#version 330 core\n"
+    BS_GLSL_VERSION
     "out vec2 v_uv;\n"
     "void main() {\n"
     "    vec2 p = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));\n"
@@ -25,7 +25,7 @@ static const char *const vs_src =
     "}\n";
 
 static const char *const fs_src =
-    "#version 330 core\n"
+    BS_GLSL_VERSION
     "in vec2 v_uv;\n"
     "out vec4 o_color;\n"
     "uniform sampler2D u_tex;\n"

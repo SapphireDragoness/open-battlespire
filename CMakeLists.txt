@@ -20,8 +20,12 @@ option(BS_BUILD_TESTS "Build the test suite" ON)
 option(BS_BUILD_TOOLS "Build command-line tools (bstool)" ON)
 option(BS_BUILD_VIEWER "Build the SDL3 programs: the game (openbattlespire), bsview and bsplay" ON)
 option(BS_FUZZ "Build libFuzzer harnesses (Clang only; implies sanitizers)" OFF)
+option(BS_GLES "Render with OpenGL ES 3.0 (and WebGL 2) instead of OpenGL 3.3 core" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+if(BS_GLES)
+    add_compile_definitions(BS_GLES)
+endif()
 include(BSCompilerFlags)
 
 add_subdirectory(third_party/stb_vorbis)
