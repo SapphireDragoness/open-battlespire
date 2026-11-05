@@ -17,6 +17,23 @@ static void test_alignment_and_zeroing(void)
     bs_arena_free(&a);
 }
 
+/* More than max_align_t (8 bytes on wasm32): by address, after an odd offset and in a new block. */
+static void test_large_alignment(void)
+{
+    bs_arena a;
+    bs_arena_init(&a, 256);
+    BS_CHECK(bs_arena_alloc(&a, 1, 1) != NULL);
+    for (size_t align = 16; align <= 64; align *= 2) {
+        unsigned char *p = bs_arena_alloc(&a, 3, align);
+        BS_CHECK(p && (uintptr_t)p % align == 0);
+    }
+    unsigned char *big = bs_arena_alloc(&a, 1000, 16); /* doesn't fit: a block of its own */
+    BS_CHECK(big && (uintptr_t)big % 16 == 0);
+    memset(big, 0xAB, 1000);
+    BS_CHECK(bs_arena_alloc(&a, 8, BS_ARENA_MAX_ALIGN * 2) == NULL);
+    bs_arena_free(&a);
+}
+
 static void test_grows_beyond_block(void)
 {
     bs_arena a;
@@ -69,6 +86,7 @@ static void test_array_overflow(void)
 int main(void)
 {
     BS_RUN(test_alignment_and_zeroing);
+    BS_RUN(test_large_alignment);
     BS_RUN(test_grows_beyond_block);
     BS_RUN(test_mark_rewind);
     BS_RUN(test_reset);

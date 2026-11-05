@@ -28,7 +28,11 @@ typedef struct bs_arena_mark {
 void bs_arena_init(bs_arena *a, size_t block_size);
 void bs_arena_free(bs_arena *a);
 
-/* Returns NULL on allocation failure or size overflow. align must be a power of two. */
+/* The largest alignment bs_arena_alloc() gives. */
+#define BS_ARENA_MAX_ALIGN ((size_t)4096)
+
+/* Returns NULL on allocation failure or size overflow. align must be a power of two, at most
+ * BS_ARENA_MAX_ALIGN (and may be more than max_align_t). */
 void *bs_arena_alloc(bs_arena *a, size_t size, size_t align);
 
 /* Copies of memory and NUL-terminated strings. */
